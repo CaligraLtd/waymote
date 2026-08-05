@@ -4,6 +4,7 @@ const Scanner = @import("wayland").Scanner;
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version = b.option([]const u8, "version", "version embedded in the binaries") orelse "0.1.0-dev";
 
     const scanner = Scanner.create(b, .{
         .wayland_xml = b.dependency("wayland_source", .{}).path("protocol/wayland.xml"),
@@ -33,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", "0.1.0-dev");
+    build_options.addOption([]const u8, "version", version);
 
     const stream_module = b.createModule(.{
         .root_source_file = b.path("main.zig"),
@@ -51,7 +52,14 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(streamd);
 
-    const go_build = b.addSystemCommand(&.{ "go", "build", "-trimpath", "-ldflags", "-s -w -X main.version=0.1.0-dev", "-o" });
+    const go_build = b.addSystemCommand(&.{
+        "go",
+        "build",
+        "-trimpath",
+        "-ldflags",
+        b.fmt("-s -w -X main.version={s}", .{version}),
+        "-o",
+    });
     go_build.setCwd(b.path("gateway"));
     go_build.setEnvironmentVariable("CGO_ENABLED", "0");
     const gateway = go_build.addOutputFileArg("waymote-gateway");

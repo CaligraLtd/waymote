@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+version="${1#v}"
+cd "$repo_root"
+
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+    echo "usage: $0 VERSION" >&2
+    exit 2
+fi
+
+case "$(uname -m)" in
+    x86_64) architecture=x86_64 ;;
+    aarch64) architecture=aarch64 ;;
+    *) echo "unsupported release architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+release_directory="$repo_root/zig-out/release"
+staging_directory="$(mktemp -d)"
+trap 'rm -rf "$staging_directory"' EXIT
+rm -rf "$release_directory"
+mkdir -p "$release_directory"
+
+server_name="waymote-server-$version-linux-$architecture"
+server_root="$staging_directory/$server_name"
+zig build install \
+    -Doptimize=ReleaseSafe \
+    -Dversion="$version" \
+    --prefix "$server_root"
+install -m 0644 README.md LICENSE "$server_root/"
+
+sdk_name="waymote-sdk-$version"
+sdk_root="$staging_directory/$sdk_name"
+mkdir -p "$sdk_root"
+cp -a gateway/sdk/. "$sdk_root/"
+(
+    cd "$sdk_root"
+    npm version "$version" --no-git-tag-version --allow-same-version >/dev/null
+)
+
+archive_options=(--sort=name --owner=0 --group=0 --numeric-owner)
+if [[ -n "${SOURCE_DATE_EPOCH:-}" ]]; then
+    archive_options+=(--mtime="@$SOURCE_DATE_EPOCH")
+fi
+tar "${archive_options[@]}" -C "$staging_directory" \
+    -czf "$release_directory/$server_name.tar.gz" "$server_name"
+tar "${archive_options[@]}" -C "$staging_directory" \
+    -czf "$release_directory/$sdk_name.tar.gz" "$sdk_name"
+
+mv "$sdk_root" "$release_directory/npm"
+(
+    cd "$release_directory/npm"
+    npm pack --pack-destination "$release_directory" >/dev/null
+)
+
+(
+    cd "$release_directory"
+    sha256sum ./*.tar.gz ./*.tgz | sort -k2 >SHA256SUMS
+)
+
+printf 'Release artifacts written to %s\n' "$release_directory"

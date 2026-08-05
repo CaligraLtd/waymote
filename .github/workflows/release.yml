@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: gateway/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwayland-dev libxkbcommon-dev pkg-config
+      - name: Validate release tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p 'require("./gateway/sdk/package.json").version')"
+          if [[ "$package_version" != "0.1.0-dev.0" && "$package_version" != "$version" ]]; then
+            echo "package version $package_version conflicts with tag version $version" >&2
+            exit 1
+          fi
+      - name: Test
+        run: |
+          zig build test -Doptimize=ReleaseSafe -Dversion="${GITHUB_REF_NAME#v}"
+          node --check gateway/sdk/waymote.js
+          node --check gateway/sdk/audio-player.js
+          node --input-type=module --check < gateway/examples/web/client.js
+          npx --yes --package typescript@5.7.3 tsc \
+            --noEmit --skipLibCheck false --lib ES2022,DOM gateway/sdk/waymote.d.ts
+      - name: Package
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          scripts/package-release "${GITHUB_REF_NAME#v}"
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          tag=latest
+          [[ "${GITHUB_REF_NAME#v}" == *-* ]] && tag=next
+          npm publish --access public --provenance --tag "$tag"
+        working-directory: zig-out/release/npm
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          options=()
+          [[ "${GITHUB_REF_NAME#v}" == *-* ]] && options+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" \
+            zig-out/release/*.tar.gz \
+            zig-out/release/*.tgz \
+            zig-out/release/SHA256SUMS \
+            --title "Waymote ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            "${options[@]}"

@@ -71,6 +71,40 @@ This installs `zig-out/bin/waymote-streamd` and
 `zig-out/bin/waymote-gateway`. The `.agents/setup` script provisions all demo
 dependencies in a fresh Amp orb.
 
+## Publish a release
+
+Release tags publish the server and browser artifacts from one version. Before
+the first release, create a granular npm access token with publish permission
+for `@rockorager/waymote` and save it as the `NPM_TOKEN` Actions secret in the
+GitHub repository. Then create and push an annotated semantic-version tag:
+
+```sh
+git tag -a v0.1.0-alpha.1 -m "Waymote 0.1.0 alpha 1"
+git push github v0.1.0-alpha.1
+```
+
+The release workflow tests the complete project, injects `0.1.0-alpha.1` into
+both native binaries and the staged npm package, publishes prereleases to the
+npm `next` tag, and creates a GitHub prerelease containing:
+
+```text
+waymote-server-0.1.0-alpha.1-linux-x86_64.tar.gz
+waymote-sdk-0.1.0-alpha.1.tar.gz
+rockorager-waymote-0.1.0-alpha.1.tgz
+SHA256SUMS
+```
+
+Versions without a prerelease suffix publish to the npm `latest` tag and create
+a full GitHub release. To build the same files locally without publishing:
+
+```sh
+scripts/package-release 0.1.0-alpha.1
+```
+
+Generated artifacts are written under `zig-out/release/`. The server archive
+contains the Go gateway and Zig stream daemon; the SDK and npm archives contain
+the JavaScript module, TypeScript declarations, and AudioWorklet.
+
 ## Architecture
 
 The gateway is the only internet-facing process:
