@@ -180,10 +180,3 @@ export declare class WaymoteSession {
     listener: (event: WaymoteEventMap[K]) => void,
   ): () => void;
 }
-
-/** Compatibility aliases for the original extracted API names. */
-export { WaymoteSession as KeyworkSession };
-export type KeyworkSessionOptions = WaymoteSessionOptions;
-export type KeyworkSessionState = WaymoteSessionState;
-export type KeyworkStats = WaymoteStats;
-export type KeyworkEventMap = WaymoteEventMap;

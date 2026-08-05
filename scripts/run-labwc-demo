@@ -48,7 +48,7 @@ fi
 pactl load-module module-null-sink \
     sink_name=waymote_session rate=48000 channels=2 >/dev/null
 export PULSE_SINK=waymote_session
-export KEYWORK_AUDIO_SOURCE=waymote_session.monitor
+export WAYMOTE_AUDIO_SOURCE=waymote_session.monitor
 
 export WLR_BACKENDS=headless
 export WLR_HEADLESS_OUTPUTS=1

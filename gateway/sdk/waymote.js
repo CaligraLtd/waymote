@@ -337,7 +337,7 @@ async function enableAudio() {
       const audioWorkletURL = options.audioWorkletURL ??
         new URL("./audio-player.js", import.meta.url);
       await audioContext.audioWorklet.addModule(audioWorkletURL);
-      audioPlayer = new AudioWorkletNode(audioContext, "keywork-audio-player", {
+      audioPlayer = new AudioWorkletNode(audioContext, "waymote-audio-player", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [2],
@@ -1919,6 +1919,3 @@ export class WaymoteSession {
     }
   }
 }
-
-// Preserve compatibility with applications using the original extracted API.
-export { WaymoteSession as KeyworkSession };

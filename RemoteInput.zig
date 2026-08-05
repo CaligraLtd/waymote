@@ -250,7 +250,7 @@ fn installKeymap(self: *RemoteInput) !void {
     const size = std.math.add(usize, text.len, 1) catch return error.KeymapTooLarge;
     if (size > std.math.maxInt(u32)) return error.KeymapTooLarge;
 
-    const fd = try std.posix.memfd_create("keywork-stream-keymap", std.os.linux.MFD.CLOEXEC);
+    const fd = try std.posix.memfd_create("waymote-keymap", std.os.linux.MFD.CLOEXEC);
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     errdefer file.close(self.io);
     try file.setLength(self.io, size);

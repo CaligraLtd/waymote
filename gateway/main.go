@@ -957,7 +957,7 @@ func main() {
 	bitrate := flag.Uint64("bitrate", 12000, "encoder target bitrate in kbps")
 	fixedWidth := flag.Uint("fixed-width", 0, "fixed output width (zero allows client resizing)")
 	fixedHeight := flag.Uint("fixed-height", 0, "fixed output height (zero allows client resizing)")
-	audioSource := flag.String("audio-source", os.Getenv("KEYWORK_AUDIO_SOURCE"), "PulseAudio monitor source (empty disables audio)")
+	audioSource := flag.String("audio-source", os.Getenv("WAYMOTE_AUDIO_SOURCE"), "PulseAudio monitor source (empty disables audio)")
 	xkbLayout := flag.String("xkb-layout", os.Getenv("XKB_DEFAULT_LAYOUT"), "XKB keyboard layout")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "public gateway URL allowed as a WebSocket origin")
 	showVersion := flag.Bool("version", false, "show the Waymote version")
@@ -1038,12 +1038,6 @@ func main() {
 	sdkFiles := http.FileServerFS(sdkRoot)
 	mux.Handle("/waymote.js", sdkFiles)
 	mux.Handle("/waymote.d.ts", sdkFiles)
-	mux.HandleFunc("/keywork-stream.js", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, sdkRoot, "waymote.js")
-	})
-	mux.HandleFunc("/keywork-stream.d.ts", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFileFS(w, r, sdkRoot, "waymote.d.ts")
-	})
 	mux.Handle("/audio-player.js", sdkFiles)
 	mux.Handle("/", http.FileServerFS(exampleRoot))
 

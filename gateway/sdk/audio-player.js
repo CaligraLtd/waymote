@@ -1,5 +1,5 @@
 // AudioWorklet companion loaded internally by WaymoteSession.
-class KeyworkAudioPlayer extends AudioWorkletProcessor {
+class WaymoteAudioPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
     this.queue = [];
@@ -180,4 +180,4 @@ class KeyworkAudioPlayer extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor("keywork-audio-player", KeyworkAudioPlayer);
+registerProcessor("waymote-audio-player", WaymoteAudioPlayer);

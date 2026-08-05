@@ -28,8 +28,7 @@ npm install ./gateway/sdk
 ```
 
 A running gateway also serves the same ESM implementation at `/waymote.js` and
-its declarations at `/waymote.d.ts`. The original `KeyworkSession` export and
-`/keywork-stream.js` route remain as compatibility aliases.
+its declarations at `/waymote.d.ts`.
 
 Remote resizing is manual by default. Choose a fixed remote size with
 `session.remoteDisplay.fixed({ width, height, scale })`, or explicitly opt into

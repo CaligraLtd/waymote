@@ -476,7 +476,7 @@ fn ensureBuffer(
 
     const byte_count = std.math.mul(usize, height, stride) catch return error.Overflow;
     if (byte_count > std.math.maxInt(i32)) return error.Overflow;
-    const fd = try std.posix.memfd_create("keywork-stream-capture", std.os.linux.MFD.CLOEXEC);
+    const fd = try std.posix.memfd_create("waymote-capture", std.os.linux.MFD.CLOEXEC);
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     defer file.close(self.io);
     try file.setLength(self.io, byte_count);
@@ -1021,11 +1021,11 @@ test "stream options require a paired audio source and RTP port" {
         "--audio-rtp-port",
         "32002",
         "--audio-source",
-        "keywork_session.monitor",
+        "waymote_session.monitor",
     } };
     const options = try parseArguments(&arguments);
     try std.testing.expectEqual(@as(?u16, 32002), options.audio_rtp_port);
-    try std.testing.expectEqualStrings("keywork_session.monitor", options.audio_source.?);
+    try std.testing.expectEqualStrings("waymote_session.monitor", options.audio_source.?);
 
     arguments = .{ .values = &.{ "--audio-rtp-port", "32002" } };
     try std.testing.expectError(error.IncompleteAudioOptions, parseArguments(&arguments));
