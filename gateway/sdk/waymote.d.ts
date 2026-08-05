@@ -174,7 +174,10 @@ export declare class WaymoteSession {
   readonly remoteDisplay: RemoteDisplayController;
   attachSurface(options: SurfaceOptions): SurfaceHandle;
   connect(): void;
+  /** Temporarily disconnect while retaining the surface and reusable audio graph. */
   disconnect(): void;
+  /** Permanently release transport, media, audio, surface, and event resources. */
+  dispose(): Promise<void>;
   on<K extends keyof WaymoteEventMap>(
     type: K,
     listener: (event: WaymoteEventMap[K]) => void,

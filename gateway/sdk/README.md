@@ -21,6 +21,19 @@ session.on("stats", (stats) => renderStats(stats));
 session.connect();
 ```
 
+Use `session.disconnect()` for a temporary, reconnectable pause. When an
+application permanently removes a session, release all transport, decoder,
+audio, surface, and event resources with:
+
+```ts
+await session.dispose();
+```
+
+Disposal is idempotent and terminal. It also disposes the attached surface;
+subsequent attempts to reconnect, attach another surface, subscribe, or invoke
+a controller throw an error. `surface.dispose()` remains available when an
+application only needs to detach or replace the current canvas.
+
 During local development, install the package directly from the repository:
 
 ```sh

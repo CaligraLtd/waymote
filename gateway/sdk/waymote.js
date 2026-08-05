@@ -11,14 +11,19 @@ let resizeObserver = null;
 let feedbackTimer = null;
 let clipboardAutoSync = false;
 let sessionConnected = false;
+let sessionDisposed = false;
+let surfaceDisposer = null;
+let disposePromise = null;
 
 let decoder = null;
 let videoSocket = null;
 const pendingFrames = [];
 let animationPending = false;
+let animationFrame = null;
 let presentationTimer = null;
 let renderedFrames = 0;
 let reconnectDelay = 250;
+let videoReconnectTimer = null;
 let decoderConfiguration = null;
 let waitingForKeyframe = true;
 let decoderGeneration = 0;
@@ -29,8 +34,10 @@ const renderedFrameTimes = [];
 const audioHeaderSize = 24;
 let audioSocket = null;
 let audioReconnectDelay = 250;
+let audioReconnectTimer = null;
 let audioConfiguration = null;
 let audioDecoder = null;
+let audioDecoderSetupGeneration = 0;
 let audioContext = null;
 let audioPlayer = null;
 let audioGain = null;
@@ -119,12 +126,15 @@ const linuxKeyCodes = new Map([
 
 let controlSocket = null;
 let controlReconnectDelay = 250;
+let controlReconnectTimer = null;
+let controlStableTimer = null;
 let controlAcquireDelay = 250;
 let controlAcquireTimer = null;
 let controlActive = false;
 let controlWanted = false;
 let pendingPointerPosition = null;
 let pointerAnimationPending = false;
+let pointerAnimationFrame = null;
 let pendingControlRecords = [];
 let resizeTimer = null;
 let resizePending = false;
@@ -150,6 +160,7 @@ const pressedKeys = new Set();
 const pressedButtons = new Set();
 let physicalTextPending = false;
 let suppressCompositionText = null;
+let compositionTimer = null;
 function emit(type, value) {
   owner.emit(type, value);
 }
@@ -271,12 +282,22 @@ async function configureAudioDecoder() {
   if (!audioWanted || !audioPlayer || !audioConfiguration?.enabled || !("AudioDecoder" in window)) {
     return;
   }
+  const setupGeneration = ++audioDecoderSetupGeneration;
+  const sourceConfiguration = audioConfiguration;
   const configuration = {
-    codec: audioConfiguration.codec,
-    sampleRate: audioConfiguration.sampleRate,
-    numberOfChannels: audioConfiguration.channels,
+    codec: sourceConfiguration.codec,
+    sampleRate: sourceConfiguration.sampleRate,
+    numberOfChannels: sourceConfiguration.channels,
   };
-  const support = await AudioDecoder.isConfigSupported(configuration);
+  let support;
+  try {
+    support = await AudioDecoder.isConfigSupported(configuration);
+  } catch (error) {
+    if (setupGeneration !== audioDecoderSetupGeneration || sessionDisposed || !sessionConnected) return;
+    throw error;
+  }
+  if (setupGeneration !== audioDecoderSetupGeneration || sessionDisposed || !sessionConnected ||
+      audioConfiguration !== sourceConfiguration) return;
   if (!support.supported || !audioWanted) {
     setAudioStatus("Opus decoding unavailable");
     return;
@@ -322,6 +343,9 @@ async function configureAudioDecoder() {
 }
 
 async function enableAudio() {
+  if (sessionDisposed) {
+    throw new Error("The session has been disposed");
+  }
   if (audioStarting) {
     return;
   }
@@ -333,17 +357,19 @@ async function enableAudio() {
   setAudioStatus("Audio starting");
   try {
     if (!audioContext) {
-      audioContext = new AudioContext({ latencyHint: "interactive", sampleRate: audioConfiguration.sampleRate });
+      const context = new AudioContext({ latencyHint: "interactive", sampleRate: audioConfiguration.sampleRate });
+      audioContext = context;
       const audioWorkletURL = options.audioWorkletURL ??
         new URL("./audio-player.js", import.meta.url);
-      await audioContext.audioWorklet.addModule(audioWorkletURL);
-      audioPlayer = new AudioWorkletNode(audioContext, "waymote-audio-player", {
+      await context.audioWorklet.addModule(audioWorkletURL);
+      if (sessionDisposed || audioContext !== context) return;
+      audioPlayer = new AudioWorkletNode(context, "waymote-audio-player", {
         numberOfInputs: 0,
         numberOfOutputs: 1,
         outputChannelCount: [2],
       });
-      audioGain = audioContext.createGain();
-      audioPlayer.connect(audioGain).connect(audioContext.destination);
+      audioGain = context.createGain();
+      audioPlayer.connect(audioGain).connect(context.destination);
       audioPlayer.port.onmessage = (event) => {
         if (event.data?.type === "underflow") {
           audioUnderflows = event.data.underflows;
@@ -376,10 +402,13 @@ async function enableAudio() {
     audioMuted = false;
     audioGain.gain.value = audioVolume;
     await audioContext.resume();
+    if (sessionDisposed) return;
     await configureAudioDecoder();
+  } catch (error) {
+    if (!sessionDisposed) throw error;
   } finally {
     audioStarting = false;
-    if (!audioConfiguration?.enabled) setAudioStatus("Session audio unavailable");
+    if (!sessionDisposed && !audioConfiguration?.enabled) setAudioStatus("Session audio unavailable");
   }
 }
 
@@ -402,9 +431,11 @@ async function sendLocalClipboard() {
     throw new Error("Clipboard read is unavailable");
   }
   const text = await navigator.clipboard.readText();
+  if (sessionDisposed) return false;
   if (!sendClipboardText(text)) {
     throw new Error("Clipboard control is inactive");
   }
+  return true;
 }
 
 function copyTextFallback(text) {
@@ -462,8 +493,11 @@ function reserveRemoteClipboardCopy() {
     return false;
   }
   write.then(
-    () => setClipboardStatus("Remote clipboard copied"),
+    () => {
+      if (!sessionDisposed) setClipboardStatus("Remote clipboard copied");
+    },
     (error) => {
+      if (sessionDisposed) return;
       if (pendingClipboardCopy === transaction) {
         clearTimeout(transaction.timeout);
         pendingClipboardCopy = null;
@@ -781,6 +815,10 @@ function retryControlAcquire() {
 
 function connectControl() {
   if (!sessionConnected) return;
+  if (controlReconnectTimer !== null) {
+    clearTimeout(controlReconnectTimer);
+    controlReconnectTimer = null;
+  }
   if (controlSocket &&
       (controlSocket.readyState === WebSocket.CONNECTING || controlSocket.readyState === WebSocket.OPEN)) {
     return;
@@ -802,7 +840,9 @@ function connectControl() {
     }
     pendingControlRecords = [];
     updateControlStatus();
-    setTimeout(() => {
+    if (controlStableTimer !== null) clearTimeout(controlStableTimer);
+    controlStableTimer = setTimeout(() => {
+      controlStableTimer = null;
       if (controlSocket === socket && socket.readyState === WebSocket.OPEN) {
         controlReconnectDelay = 250;
       }
@@ -904,7 +944,10 @@ function connectControl() {
     }
     if (sessionConnected && !document.hidden) {
       setControlStatus(`Input reconnecting · ${event.code}`);
-      setTimeout(connectControl, controlReconnectDelay);
+      controlReconnectTimer = setTimeout(() => {
+        controlReconnectTimer = null;
+        connectControl();
+      }, controlReconnectDelay);
       controlReconnectDelay = Math.min(controlReconnectDelay * 2, 5000);
     } else {
       setControlStatus("Input disconnected");
@@ -938,7 +981,8 @@ function queuePointerPosition(event) {
     return;
   }
   pointerAnimationPending = true;
-  requestAnimationFrame(() => {
+  pointerAnimationFrame = requestAnimationFrame(() => {
+    pointerAnimationFrame = null;
     pointerAnimationPending = false;
     const position = pendingPointerPosition;
     pendingPointerPosition = null;
@@ -1023,10 +1067,12 @@ function handleKeyDown(event) {
       clipboardPastePending = true;
       const modifiers = shortcutModifiers(event);
       sendLocalClipboard().catch((error) => {
-        console.warn("local clipboard sync failed", error);
-        setClipboardStatus("Local clipboard unavailable");
+        if (!sessionDisposed) {
+          console.warn("local clipboard sync failed", error);
+          setClipboardStatus("Local clipboard unavailable");
+        }
       }).finally(() => {
-        tapRemoteKey(key, modifiers);
+        if (!sessionDisposed) tapRemoteKey(key, modifiers);
         clipboardPastePending = false;
       });
     }
@@ -1111,7 +1157,13 @@ async function configureDecoder(configuration) {
   };
   waitingForKeyframe = true;
   renderedFrameTimes.length = 0;
-  const support = await VideoDecoder.isConfigSupported(decoderConfiguration);
+  let support;
+  try {
+    support = await VideoDecoder.isConfigSupported(decoderConfiguration);
+  } catch (error) {
+    if (generation !== decoderGeneration || sessionDisposed || !sessionConnected) return;
+    throw error;
+  }
   if (generation !== decoderGeneration) {
     return;
   }
@@ -1165,10 +1217,11 @@ function scheduleVideoPresentation() {
     return;
   }
   animationPending = true;
-  requestAnimationFrame(renderFrame);
+  animationFrame = requestAnimationFrame(renderFrame);
 }
 
 function renderFrame() {
+  animationFrame = null;
   animationPending = false;
   if (pendingFrames.length === 0) {
     return;
@@ -1314,7 +1367,9 @@ function handleCompositionEnd(event) {
     }));
   }
   suppressCompositionText = event.data;
-  setTimeout(() => {
+  if (compositionTimer !== null) clearTimeout(compositionTimer);
+  compositionTimer = setTimeout(() => {
+    compositionTimer = null;
     if (suppressCompositionText === event.data) {
       suppressCompositionText = null;
     }
@@ -1383,6 +1438,10 @@ function sendFeedback() {
 
 function connectVideo() {
   if (!sessionConnected || document.hidden) return;
+  if (videoReconnectTimer !== null) {
+    clearTimeout(videoReconnectTimer);
+    videoReconnectTimer = null;
+  }
   setStatus("Connecting");
   const socket = new WebSocket(websocketURL("/stream"));
   videoSocket = socket;
@@ -1398,6 +1457,7 @@ function connectVideo() {
       const message = JSON.parse(event.data);
       if (message.type === "video-config") {
         configureDecoder(message).catch((error) => {
+          if (videoSocket !== socket || sessionDisposed || !sessionConnected) return;
           console.error("video decoder configuration failed", error);
           setStatus("Video decoder error");
           socket.close(4001, "video decoder configuration failed");
@@ -1430,7 +1490,12 @@ function connectVideo() {
     }
     decoderConfiguration = null;
     waitingForKeyframe = true;
-    if (sessionConnected && !document.hidden) setTimeout(connectVideo, reconnectDelay);
+    if (sessionConnected && !document.hidden) {
+      videoReconnectTimer = setTimeout(() => {
+        videoReconnectTimer = null;
+        connectVideo();
+      }, reconnectDelay);
+    }
     reconnectDelay = Math.min(reconnectDelay * 2, 5000);
   });
   socket.addEventListener("error", () => socket.close());
@@ -1467,6 +1532,10 @@ function decodeAudioMessage(buffer) {
 
 function connectAudio() {
   if (!sessionConnected) return;
+  if (audioReconnectTimer !== null) {
+    clearTimeout(audioReconnectTimer);
+    audioReconnectTimer = null;
+  }
   setAudioStatus("Audio connecting");
   const socket = new WebSocket(websocketURL("/audio"));
   socket.binaryType = "arraybuffer";
@@ -1490,6 +1559,7 @@ function connectAudio() {
         socket.close(1003, "invalid audio configuration");
         return;
       }
+      audioDecoderSetupGeneration += 1;
       audioConfiguration = message;
       if (!message.enabled) {
         setAudioStatus("Session audio unavailable");
@@ -1509,10 +1579,16 @@ function connectAudio() {
       return;
     }
     audioSocket = null;
+    audioDecoderSetupGeneration += 1;
     closeAudioDecoder();
     resetAudioPlayer();
     setAudioStatus(sessionConnected ? "Audio reconnecting" : "Audio disconnected");
-    if (sessionConnected) setTimeout(connectAudio, audioReconnectDelay);
+    if (sessionConnected) {
+      audioReconnectTimer = setTimeout(() => {
+        audioReconnectTimer = null;
+        connectAudio();
+      }, audioReconnectDelay);
+    }
     audioReconnectDelay = Math.min(audioReconnectDelay * 2, 5000);
   });
   socket.addEventListener("error", () => socket.close());
@@ -1581,6 +1657,9 @@ function addSurfaceListener(target, type, listener, options) {
 }
 
 function attachSurface(surfaceOptions) {
+  if (sessionDisposed) {
+    throw new Error("The session has been disposed");
+  }
   if (!surfaceOptions?.canvas) {
     throw new TypeError("attachSurface requires a canvas");
   }
@@ -1654,47 +1733,53 @@ function attachSurface(surfaceOptions) {
   refreshResizeObservation();
 
   const attachedCanvas = display;
-  let disposed = false;
+  let surfaceDisposed = false;
+  const disposeSurface = () => {
+    if (surfaceDisposed) return;
+    surfaceDisposed = true;
+    releaseControl();
+    if (document.pointerLockElement === attachedCanvas) document.exitPointerLock();
+    for (const cleanup of surfaceCleanup.splice(0)) cleanup();
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    window.removeEventListener("resize", scheduleResize);
+    if (resizeTimer !== null) {
+      clearTimeout(resizeTimer);
+      resizeTimer = null;
+    }
+    resizePending = false;
+    if (ownsImeProxy) imeProxy.remove();
+    display = null;
+    inputElement = null;
+    imeProxy = null;
+    context = null;
+    if (surfaceDisposer === disposeSurface) surfaceDisposer = null;
+  };
+  surfaceDisposer = disposeSurface;
   return Object.freeze({
     requestPointerLock() {
-      if (disposed) throw new Error("The surface has been disposed");
+      if (surfaceDisposed) throw new Error("The surface has been disposed");
       return Promise.resolve(attachedCanvas.requestPointerLock());
     },
     exitPointerLock() {
       if (document.pointerLockElement === attachedCanvas) document.exitPointerLock();
     },
     focus() {
-      if (disposed) throw new Error("The surface has been disposed");
+      if (surfaceDisposed) throw new Error("The surface has been disposed");
       inputElement.focus({ preventScroll: true });
     },
     focusTextInput() {
-      if (disposed) throw new Error("The surface has been disposed");
+      if (surfaceDisposed) throw new Error("The surface has been disposed");
       imeProxy.focus({ preventScroll: true });
     },
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      releaseControl();
-      if (document.pointerLockElement === attachedCanvas) document.exitPointerLock();
-      for (const cleanup of surfaceCleanup.splice(0)) cleanup();
-      resizeObserver?.disconnect();
-      resizeObserver = null;
-      window.removeEventListener("resize", scheduleResize);
-      if (resizeTimer !== null) {
-        clearTimeout(resizeTimer);
-        resizeTimer = null;
-      }
-      resizePending = false;
-      if (ownsImeProxy) imeProxy.remove();
-      display = null;
-      inputElement = null;
-      imeProxy = null;
-      context = null;
-    },
+    dispose: disposeSurface,
   });
 }
 
 function connect() {
+  if (sessionDisposed) {
+    throw new Error("The session has been disposed");
+  }
   if (sessionConnected) return;
   if (!display || !context) {
     throw new Error("Attach a canvas before connecting the session");
@@ -1714,7 +1799,7 @@ function connect() {
 }
 
 function disconnect() {
-  if (!sessionConnected) return;
+  const wasConnected = sessionConnected;
   sessionConnected = false;
   releaseControl();
   resizeObserver?.disconnect();
@@ -1729,6 +1814,13 @@ function disconnect() {
     clearInterval(feedbackTimer);
     feedbackTimer = null;
   }
+  for (const timer of [controlReconnectTimer, controlStableTimer, videoReconnectTimer, audioReconnectTimer]) {
+    if (timer !== null) clearTimeout(timer);
+  }
+  controlReconnectTimer = null;
+  controlStableTimer = null;
+  videoReconnectTimer = null;
+  audioReconnectTimer = null;
   for (const socket of [videoSocket, controlSocket, audioSocket]) {
     socket?.close(1000, "client disconnect");
   }
@@ -1738,21 +1830,75 @@ function disconnect() {
   decoderGeneration += 1;
   decoder?.close();
   decoder = null;
+  audioDecoderSetupGeneration += 1;
   closeAudioDecoder();
+  resetAudioPlayer();
   for (const frame of pendingFrames.splice(0)) frame.close();
   if (presentationTimer !== null) {
     clearTimeout(presentationTimer);
     presentationTimer = null;
   }
-  owner.updateState("video", { state: "disconnected", message: "Video disconnected" });
-  owner.updateState("input", { state: "disconnected", message: "Input disconnected", connected: false });
-  owner.updateState("audio", { state: "disconnected", message: "Audio disconnected" });
+  if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+  animationFrame = null;
+  animationPending = false;
+  if (pointerAnimationFrame !== null) cancelAnimationFrame(pointerAnimationFrame);
+  pointerAnimationFrame = null;
+  pointerAnimationPending = false;
+  pendingPointerPosition = null;
+  if (wasConnected) {
+    owner.updateState("video", { state: "disconnected", message: "Video disconnected" });
+    owner.updateState("input", { state: "disconnected", message: "Input disconnected", connected: false });
+    owner.updateState("audio", { state: "disconnected", message: "Audio disconnected" });
+  }
+}
+
+function dispose() {
+  if (disposePromise) return disposePromise;
+  sessionDisposed = true;
+  disposePromise = (async () => {
+    surfaceDisposer?.();
+    disconnect();
+    if (compositionTimer !== null) clearTimeout(compositionTimer);
+    compositionTimer = null;
+    suppressCompositionText = null;
+    if (pendingClipboardCopy) {
+      const transaction = pendingClipboardCopy;
+      pendingClipboardCopy = null;
+      clearTimeout(transaction.timeout);
+      transaction.reject(new Error("The session has been disposed"));
+    }
+    if (shortcutClipboardCopy) clearTimeout(shortcutClipboardCopy.timeout);
+    shortcutClipboardCopy = null;
+    clipboardPastePending = false;
+    pings.clear();
+    resizeRequests.clear();
+    audioWanted = false;
+    resetAudioPlayer();
+    closeAudioDecoder();
+    const player = audioPlayer;
+    const gain = audioGain;
+    const contextToClose = audioContext;
+    audioPlayer = null;
+    audioGain = null;
+    audioContext = null;
+    audioConfiguration = null;
+    if (player) {
+      player.port.onmessage = null;
+      player.disconnect();
+    }
+    gain?.disconnect();
+    if (contextToClose && contextToClose.state !== "closed") {
+      await contextToClose.close();
+    }
+  })();
+  return disposePromise;
 }
 
 return {
   attachSurface,
   connect,
   disconnect,
+  dispose,
   enableAudio,
   getAudioMuted: () => audioMuted,
   getRemoteClipboard: () => remoteClipboard,
@@ -1816,6 +1962,8 @@ export class WaymoteSession {
   #remoteDisplayPolicy;
   #controlOnFocus = false;
   #runtime;
+  #disposed = false;
+  #disposePromise = null;
 
   constructor(options = {}) {
     this.#remoteDisplayPolicy = normalizeRemoteDisplayPolicy(
@@ -1852,21 +2000,45 @@ export class WaymoteSession {
 
     const session = this;
     this.video = Object.freeze({
-      setLatencyTarget: (milliseconds) => this.#runtime.setLatencyTarget(milliseconds),
+      setLatencyTarget: (milliseconds) => {
+        this.#assertActive();
+        this.#runtime.setLatencyTarget(milliseconds);
+      },
     });
     this.audio = Object.freeze({
-      enable: () => this.#runtime.enableAudio(),
-      setMuted: (muted) => this.#runtime.setMuted(muted),
-      setVolume: (volume) => this.#runtime.setVolume(volume),
-      toggleMuted: () => this.#runtime.setMuted(!this.#runtime.getAudioMuted()),
+      enable: () => {
+        this.#assertActive();
+        return this.#runtime.enableAudio();
+      },
+      setMuted: (muted) => {
+        this.#assertActive();
+        this.#runtime.setMuted(muted);
+      },
+      setVolume: (volume) => {
+        this.#assertActive();
+        this.#runtime.setVolume(volume);
+      },
+      toggleMuted: () => {
+        this.#assertActive();
+        this.#runtime.setMuted(!this.#runtime.getAudioMuted());
+      },
       get muted() { return session.#runtime.getAudioMuted(); },
     });
     this.input = Object.freeze({
-      acquire: () => this.#runtime.requestControl(),
-      release: () => this.#runtime.releaseControl(),
+      acquire: () => {
+        this.#assertActive();
+        this.#runtime.requestControl();
+      },
+      release: () => {
+        this.#assertActive();
+        this.#runtime.releaseControl();
+      },
     });
     this.clipboard = Object.freeze({
-      sendText: (text) => this.#runtime.sendClipboardText(String(text)),
+      sendText: (text) => {
+        this.#assertActive();
+        return this.#runtime.sendClipboardText(String(text));
+      },
       get latestRemoteText() { return session.#runtime.getRemoteClipboard(); },
     });
     this.remoteDisplay = Object.freeze({
@@ -1879,10 +2051,12 @@ export class WaymoteSession {
   }
 
   attachSurface(options) {
+    this.#assertActive();
     return this.#runtime.attachSurface(options);
   }
 
   on(type, listener) {
+    this.#assertActive();
     if (typeof listener !== "function") throw new TypeError("Event listener must be a function");
     let listeners = this.#listeners.get(type);
     if (!listeners) this.#listeners.set(type, listeners = new Set());
@@ -1891,16 +2065,31 @@ export class WaymoteSession {
   }
 
   connect() {
+    this.#assertActive();
     this.#runtime.connect();
   }
 
   disconnect() {
+    if (this.#disposed) return;
     this.#runtime.disconnect();
   }
 
+  dispose() {
+    if (this.#disposePromise) return this.#disposePromise;
+    this.#disposed = true;
+    this.#listeners.clear();
+    this.#disposePromise = this.#runtime.dispose();
+    return this.#disposePromise;
+  }
+
   #setRemoteDisplayPolicy(policy) {
+    this.#assertActive();
     this.#remoteDisplayPolicy = normalizeRemoteDisplayPolicy(policy);
     this.#runtime?.remoteDisplayPolicyChanged();
+  }
+
+  #assertActive() {
+    if (this.#disposed) throw new Error("The session has been disposed");
   }
 
   #updateState(section, changes) {

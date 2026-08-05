@@ -32,6 +32,7 @@ This produces `zig-out/bin/waymote-streamd` and
 node --check gateway/sdk/waymote.js
 node --check gateway/sdk/audio-player.js
 node --input-type=module --check < gateway/examples/web/client.js
+node --test gateway/sdk/waymote.test.mjs
 npx --yes --package typescript@5.7.3 tsc \
   --noEmit --skipLibCheck false --lib ES2022,DOM gateway/sdk/waymote.d.ts
 npm pack --dry-run ./gateway/sdk
