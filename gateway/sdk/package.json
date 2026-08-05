@@ -27,6 +27,11 @@
     "streaming",
     "webcodecs"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rockorager/waymote.git",
+    "directory": "gateway/sdk"
+  },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
