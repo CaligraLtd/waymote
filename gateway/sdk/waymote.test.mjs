@@ -217,6 +217,7 @@ test("disconnect invalidates an in-flight audio decoder setup", async () => {
   const session = new WaymoteSession({ endpoint: "https://desktop.example.com" });
   session.attachSurface({ canvas, textInputElement: textInput });
   session.connect();
+  await Promise.resolve();
   const audioSocket = FakeWebSocket.sockets.find((socket) => socket.url.endsWith("/audio"));
   audioSocket.readyState = FakeWebSocket.OPEN;
   audioSocket.dispatch("message", {
@@ -243,4 +244,191 @@ test("disconnect invalidates an in-flight audio decoder setup", async () => {
   await enabling;
   assert.equal(decoderConstructions, 0);
   await session.dispose();
+});
+
+test("audio-disabled sessions use the socket factory only for video and control", async () => {
+  const fakeWindow = new FakeTarget();
+  fakeWindow.devicePixelRatio = 1;
+  fakeWindow.VideoDecoder = true;
+  const fakeDocument = new FakeTarget();
+  fakeDocument.hidden = false;
+  globalThis.window = fakeWindow;
+  globalThis.document = fakeDocument;
+
+  class FakeWebSocket extends FakeTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSED = 3;
+    readyState = FakeWebSocket.CONNECTING;
+    binaryType = "";
+    send() {}
+    close() { this.readyState = FakeWebSocket.CLOSED; }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+
+  const paths = [];
+  const session = new WaymoteSession({
+    endpoint: "https://desktop.example.com",
+    audio: false,
+    createWebSocket(path) {
+      paths.push(path);
+      return new FakeWebSocket();
+    },
+  });
+  const canvas = new FakeTarget();
+  canvas.width = 1280;
+  canvas.height = 720;
+  canvas.getContext = () => ({});
+  canvas.focus = () => {};
+  const textInput = new FakeTarget();
+  textInput.value = "";
+  textInput.focus = () => {};
+  session.attachSurface({ canvas, textInputElement: textInput });
+  session.connect();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(paths.sort(), ["/control", "/stream"]);
+  assert.equal(session.state.audio.state, "unavailable");
+  await session.audio.enable();
+  assert.deepEqual(paths.sort(), ["/control", "/stream"]);
+  await session.dispose();
+});
+
+test("reconnect gets fresh sockets and closes late sockets from the prior connection", async () => {
+  const fakeWindow = new FakeTarget();
+  fakeWindow.devicePixelRatio = 1;
+  fakeWindow.VideoDecoder = true;
+  const fakeDocument = new FakeTarget();
+  fakeDocument.hidden = false;
+  globalThis.window = fakeWindow;
+  globalThis.document = fakeDocument;
+
+  class FakeWebSocket extends FakeTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSED = 3;
+    readyState = FakeWebSocket.CONNECTING;
+    binaryType = "";
+    closeCalls = 0;
+    send() {}
+    close() {
+      this.closeCalls += 1;
+      this.readyState = FakeWebSocket.CLOSED;
+    }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+
+  const attempts = [];
+  const session = new WaymoteSession({
+    endpoint: "https://desktop.example.com",
+    audio: false,
+    createWebSocket(path) {
+      let resolve;
+      const promise = new Promise((next) => { resolve = next; });
+      attempts.push({ path, resolve });
+      return promise;
+    },
+  });
+  const canvas = new FakeTarget();
+  canvas.width = 1280;
+  canvas.height = 720;
+  canvas.getContext = () => ({});
+  canvas.focus = () => {};
+  const textInput = new FakeTarget();
+  textInput.value = "";
+  textInput.focus = () => {};
+  session.attachSurface({ canvas, textInputElement: textInput });
+
+  session.connect();
+  await Promise.resolve();
+  assert.equal(attempts.length, 2);
+  session.disconnect();
+  session.connect();
+  await Promise.resolve();
+  assert.equal(attempts.length, 4);
+
+  const staleSockets = attempts.slice(0, 2).map(() => new FakeWebSocket());
+  attempts.slice(0, 2).forEach((attempt, index) => attempt.resolve(staleSockets[index]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(staleSockets.every((socket) => socket.closeCalls === 1));
+
+  const currentSockets = attempts.slice(2).map(() => new FakeWebSocket());
+  attempts.slice(2).forEach((attempt, index) => attempt.resolve(currentSockets[index]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(currentSockets.every((socket) => socket.closeCalls === 0));
+
+  await session.dispose();
+  assert.ok(currentSockets.every((socket) => socket.closeCalls === 1));
+});
+
+test("visibility changes replace every pending transport socket", async () => {
+  const fakeWindow = new FakeTarget();
+  fakeWindow.devicePixelRatio = 1;
+  fakeWindow.VideoDecoder = true;
+  const fakeDocument = new FakeTarget();
+  fakeDocument.hidden = false;
+  globalThis.window = fakeWindow;
+  globalThis.document = fakeDocument;
+
+  class FakeWebSocket extends FakeTarget {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    static CLOSED = 3;
+    readyState = FakeWebSocket.CONNECTING;
+    closeCalls = 0;
+    send() {}
+    close() {
+      this.closeCalls += 1;
+      this.readyState = FakeWebSocket.CLOSED;
+    }
+  }
+  globalThis.WebSocket = FakeWebSocket;
+
+  const attempts = [];
+  const session = new WaymoteSession({
+    endpoint: "https://desktop.example.com",
+    createWebSocket(path) {
+      let resolve;
+      const promise = new Promise((next) => { resolve = next; });
+      attempts.push({ path, resolve });
+      return promise;
+    },
+  });
+  const canvas = new FakeTarget();
+  canvas.width = 1280;
+  canvas.height = 720;
+  canvas.getContext = () => ({});
+  canvas.focus = () => {};
+  const textInput = new FakeTarget();
+  textInput.value = "";
+  textInput.focus = () => {};
+  session.attachSurface({ canvas, textInputElement: textInput });
+
+  session.connect();
+  await Promise.resolve();
+  assert.deepEqual(attempts.map(({ path }) => path).sort(), ["/audio", "/control", "/stream"]);
+  fakeDocument.hidden = true;
+  fakeDocument.dispatch("visibilitychange", {});
+  fakeDocument.hidden = false;
+  fakeDocument.dispatch("visibilitychange", {});
+  await Promise.resolve();
+  assert.equal(attempts.length, 6);
+
+  const staleSockets = attempts.slice(0, 3).map(() => new FakeWebSocket());
+  attempts.slice(0, 3).forEach((attempt, index) => attempt.resolve(staleSockets[index]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(staleSockets.every((socket) => socket.closeCalls === 1));
+
+  const currentSockets = attempts.slice(3).map(() => new FakeWebSocket());
+  attempts.slice(3).forEach((attempt, index) => attempt.resolve(currentSockets[index]));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(currentSockets.every((socket) => socket.closeCalls === 0));
+
+  await session.dispose();
+  assert.ok(currentSockets.every((socket) => socket.closeCalls === 1));
 });

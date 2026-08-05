@@ -12,6 +12,7 @@ let feedbackTimer = null;
 let clipboardAutoSync = false;
 let sessionConnected = false;
 let sessionDisposed = false;
+let connectionGeneration = 0;
 let surfaceDisposer = null;
 let disposePromise = null;
 
@@ -24,6 +25,7 @@ let presentationTimer = null;
 let renderedFrames = 0;
 let reconnectDelay = 250;
 let videoReconnectTimer = null;
+let videoConnectAttempt = null;
 let decoderConfiguration = null;
 let waitingForKeyframe = true;
 let decoderGeneration = 0;
@@ -35,6 +37,7 @@ const audioHeaderSize = 24;
 let audioSocket = null;
 let audioReconnectDelay = 250;
 let audioReconnectTimer = null;
+let audioConnectAttempt = null;
 let audioConfiguration = null;
 let audioDecoder = null;
 let audioDecoderSetupGeneration = 0;
@@ -128,6 +131,7 @@ let controlSocket = null;
 let controlReconnectDelay = 250;
 let controlReconnectTimer = null;
 let controlStableTimer = null;
+let controlConnectAttempt = null;
 let controlAcquireDelay = 250;
 let controlAcquireTimer = null;
 let controlActive = false;
@@ -171,6 +175,17 @@ function websocketURL(path) {
   return url;
 }
 
+async function createWebSocket(path) {
+  const url = websocketURL(path);
+  const socket = options.createWebSocket
+    ? await options.createWebSocket(path, url)
+    : new WebSocket(url);
+  if (!socket || typeof socket.addEventListener !== "function" || typeof socket.close !== "function") {
+    throw new TypeError("createWebSocket must return a WebSocket-compatible object");
+  }
+  return socket;
+}
+
 function setStatus(text, connected = false) {
   const state = connected ? "connected" : text.startsWith("Reconnecting")
     ? "reconnecting" : text.includes("connecting") || text === "Connecting"
@@ -193,7 +208,7 @@ function setClipboardStatus(text) {
 
 function setAudioStatus(text) {
   const state = text === "Audio active" ? "active" : text === "Audio ready"
-    ? "ready" : text.includes("unavailable") ? "unavailable"
+    ? "ready" : text.includes("unavailable") || text.includes("disabled") ? "unavailable"
       : text.includes("error") || text.includes("denied") ? "error"
         : text.includes("muted") ? "muted" : text.includes("disconnected")
           ? "disconnected" : "connecting";
@@ -345,6 +360,10 @@ async function configureAudioDecoder() {
 async function enableAudio() {
   if (sessionDisposed) {
     throw new Error("The session has been disposed");
+  }
+  if (options.audio === false) {
+    setAudioStatus("Audio disabled");
+    return;
   }
   if (audioStarting) {
     return;
@@ -779,7 +798,7 @@ function requestControl() {
     clearTimeout(controlAcquireTimer);
     controlAcquireTimer = null;
   }
-  if (sessionConnected) connectControl();
+  if (sessionConnected) void connectControl();
   if (controlSocket && controlSocket.readyState === WebSocket.OPEN) {
     controlSocket.send("acquire");
     setControlStatus("Input requesting");
@@ -813,8 +832,8 @@ function retryControlAcquire() {
   controlAcquireTimer = setTimeout(retryControlAcquire, controlAcquireDelay);
 }
 
-function connectControl() {
-  if (!sessionConnected) return;
+async function connectControl() {
+  if (!sessionConnected || document.hidden) return;
   if (controlReconnectTimer !== null) {
     clearTimeout(controlReconnectTimer);
     controlReconnectTimer = null;
@@ -823,8 +842,34 @@ function connectControl() {
       (controlSocket.readyState === WebSocket.CONNECTING || controlSocket.readyState === WebSocket.OPEN)) {
     return;
   }
+  if (controlConnectAttempt) return;
   setControlStatus("Input connecting");
-  const socket = new WebSocket(websocketURL("/control"));
+  const attempt = { generation: connectionGeneration };
+  controlConnectAttempt = attempt;
+  let socket;
+  try {
+    socket = await createWebSocket("/control");
+  } catch (error) {
+    if (controlConnectAttempt !== attempt) return;
+    controlConnectAttempt = null;
+    if (!sessionConnected || document.hidden || attempt.generation !== connectionGeneration) return;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    emit("error", failure);
+    setControlStatus(`Input reconnecting · ${failure.message}`);
+    controlReconnectTimer = setTimeout(() => {
+      controlReconnectTimer = null;
+      void connectControl();
+    }, controlReconnectDelay);
+    controlReconnectDelay = Math.min(controlReconnectDelay * 2, 5000);
+    return;
+  }
+  if (controlConnectAttempt !== attempt || !sessionConnected || document.hidden ||
+      attempt.generation !== connectionGeneration) {
+    if (controlConnectAttempt === attempt) controlConnectAttempt = null;
+    socket.close(1000, "stale connection attempt");
+    return;
+  }
+  controlConnectAttempt = null;
   socket.binaryType = "arraybuffer";
   controlSocket = socket;
   socket.addEventListener("open", () => {
@@ -946,7 +991,7 @@ function connectControl() {
       setControlStatus(`Input reconnecting · ${event.code}`);
       controlReconnectTimer = setTimeout(() => {
         controlReconnectTimer = null;
-        connectControl();
+        void connectControl();
       }, controlReconnectDelay);
       controlReconnectDelay = Math.min(controlReconnectDelay * 2, 5000);
     } else {
@@ -1135,10 +1180,14 @@ function handleSurfaceBlur(event) {
 function handleVisibilityChange() {
   if (document.hidden) {
     releaseControl();
+    controlConnectAttempt = null;
+    videoConnectAttempt = null;
+    audioConnectAttempt = null;
     videoSocket?.close(1000, "page hidden");
   } else if (sessionConnected) {
-    connectControl();
-    if (!videoSocket) connectVideo();
+    void connectControl();
+    if (!videoSocket) void connectVideo();
+    if (options.audio !== false && !audioSocket) void connectAudio();
     if (owner.controlOnFocus() && document.activeElement === inputElement) {
       requestControl();
     }
@@ -1436,14 +1485,40 @@ function sendFeedback() {
   intervalChunks = 0;
 }
 
-function connectVideo() {
+async function connectVideo() {
   if (!sessionConnected || document.hidden) return;
   if (videoReconnectTimer !== null) {
     clearTimeout(videoReconnectTimer);
     videoReconnectTimer = null;
   }
+  if (videoConnectAttempt) return;
   setStatus("Connecting");
-  const socket = new WebSocket(websocketURL("/stream"));
+  const attempt = { generation: connectionGeneration };
+  videoConnectAttempt = attempt;
+  let socket;
+  try {
+    socket = await createWebSocket("/stream");
+  } catch (error) {
+    if (videoConnectAttempt !== attempt) return;
+    videoConnectAttempt = null;
+    if (!sessionConnected || attempt.generation !== connectionGeneration || document.hidden) return;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    emit("error", failure);
+    setStatus(`Reconnecting · ${failure.message}`);
+    videoReconnectTimer = setTimeout(() => {
+      videoReconnectTimer = null;
+      void connectVideo();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+    return;
+  }
+  if (videoConnectAttempt !== attempt || !sessionConnected || document.hidden ||
+      attempt.generation !== connectionGeneration) {
+    if (videoConnectAttempt === attempt) videoConnectAttempt = null;
+    socket.close(1000, "stale connection attempt");
+    return;
+  }
+  videoConnectAttempt = null;
   videoSocket = socket;
   socket.binaryType = "arraybuffer";
   socket.addEventListener("open", () => {
@@ -1493,7 +1568,7 @@ function connectVideo() {
     if (sessionConnected && !document.hidden) {
       videoReconnectTimer = setTimeout(() => {
         videoReconnectTimer = null;
-        connectVideo();
+        void connectVideo();
       }, reconnectDelay);
     }
     reconnectDelay = Math.min(reconnectDelay * 2, 5000);
@@ -1530,14 +1605,40 @@ function decodeAudioMessage(buffer) {
   }));
 }
 
-function connectAudio() {
-  if (!sessionConnected) return;
+async function connectAudio() {
+  if (!sessionConnected || document.hidden || options.audio === false) return;
   if (audioReconnectTimer !== null) {
     clearTimeout(audioReconnectTimer);
     audioReconnectTimer = null;
   }
+  if (audioConnectAttempt) return;
   setAudioStatus("Audio connecting");
-  const socket = new WebSocket(websocketURL("/audio"));
+  const attempt = { generation: connectionGeneration };
+  audioConnectAttempt = attempt;
+  let socket;
+  try {
+    socket = await createWebSocket("/audio");
+  } catch (error) {
+    if (audioConnectAttempt !== attempt) return;
+    audioConnectAttempt = null;
+    if (!sessionConnected || document.hidden || attempt.generation !== connectionGeneration) return;
+    const failure = error instanceof Error ? error : new Error(String(error));
+    emit("error", failure);
+    setAudioStatus(`Audio reconnecting · ${failure.message}`);
+    audioReconnectTimer = setTimeout(() => {
+      audioReconnectTimer = null;
+      void connectAudio();
+    }, audioReconnectDelay);
+    audioReconnectDelay = Math.min(audioReconnectDelay * 2, 5000);
+    return;
+  }
+  if (audioConnectAttempt !== attempt || !sessionConnected || document.hidden ||
+      attempt.generation !== connectionGeneration) {
+    if (audioConnectAttempt === attempt) audioConnectAttempt = null;
+    socket.close(1000, "stale connection attempt");
+    return;
+  }
+  audioConnectAttempt = null;
   socket.binaryType = "arraybuffer";
   audioSocket = socket;
   socket.addEventListener("open", () => {
@@ -1583,10 +1684,10 @@ function connectAudio() {
     closeAudioDecoder();
     resetAudioPlayer();
     setAudioStatus(sessionConnected ? "Audio reconnecting" : "Audio disconnected");
-    if (sessionConnected) {
+    if (sessionConnected && !document.hidden) {
       audioReconnectTimer = setTimeout(() => {
         audioReconnectTimer = null;
-        connectAudio();
+        void connectAudio();
       }, audioReconnectDelay);
     }
     audioReconnectDelay = Math.min(audioReconnectDelay * 2, 5000);
@@ -1791,9 +1892,14 @@ function connect() {
     return;
   }
   sessionConnected = true;
-  connectControl();
-  connectAudio();
-  connectVideo();
+  connectionGeneration += 1;
+  void connectControl();
+  if (options.audio === false) {
+    setAudioStatus("Audio disabled");
+  } else {
+    void connectAudio();
+  }
+  void connectVideo();
   refreshResizeObservation();
   feedbackTimer = setInterval(sendFeedback, 1000);
 }
@@ -1801,6 +1907,10 @@ function connect() {
 function disconnect() {
   const wasConnected = sessionConnected;
   sessionConnected = false;
+  connectionGeneration += 1;
+  controlConnectAttempt = null;
+  videoConnectAttempt = null;
+  audioConnectAttempt = null;
   releaseControl();
   resizeObserver?.disconnect();
   resizeObserver = null;

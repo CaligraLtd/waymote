@@ -21,6 +21,24 @@ session.on("stats", (stats) => renderStats(stats));
 session.connect();
 ```
 
+Applications that authenticate WebSockets can supply a synchronous or
+asynchronous socket factory. It is invoked separately for every initial
+connection and reconnect, so credentials can always be refreshed:
+
+```ts
+const session = new WaymoteSession({
+  audio: false,
+  createWebSocket: async (_path, url) => {
+    const token = await getFreshDesktopToken();
+    return new WebSocket(url, [token]);
+  },
+});
+```
+
+Keep credentials in the WebSocket protocol or another authorization mechanism;
+do not place them in query parameters. Setting `audio: false` prevents the SDK
+from opening `/audio` and makes `session.audio.enable()` a no-op.
+
 Use `session.disconnect()` for a temporary, reconnectable pause. When an
 application permanently removes a session, release all transport, decoder,
 audio, surface, and event resources with:

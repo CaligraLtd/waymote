@@ -33,6 +33,16 @@ export type RemoteDisplayPolicy =
 export interface WaymoteSessionOptions {
   readonly endpoint?: string | URL;
   readonly latency?: number;
+  /** Defaults to true. When false, the session never opens the audio transport. */
+  readonly audio?: boolean;
+  /**
+   * Creates each initial and reconnecting transport socket. Use this to attach
+   * fresh authentication without placing credentials in the URL.
+   */
+  readonly createWebSocket?: (
+    path: "/stream" | "/audio" | "/control",
+    url: URL,
+  ) => WebSocket | Promise<WebSocket>;
   /** Defaults to audio-player.js beside the SDK module. */
   readonly audioWorkletURL?: string | URL;
   /** Defaults to manual; local canvas sizing never implicitly changes this. */
