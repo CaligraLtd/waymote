@@ -1,0 +1,7 @@
+services:
+  waymote-quake3-fixed:
+    command: scripts/run-labwc-demo
+    portal:
+      title: Waymote Quake III Stream
+      description: Quake III in a headless Labwc session streamed to the browser.
+      review: false

@@ -1,0 +1,31 @@
+.{
+    .name = .waymote,
+    .version = "0.1.0-dev",
+    .fingerprint = 0x7f85e57c250f3fe3,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .wayland = .{
+            .url = "git+https://codeberg.org/ifreund/zig-wayland#a8e10e87e5ebb49ce518ac3d2198909c87ee615a",
+            .hash = "wayland-0.7.0-dev-lQa1kjT8AQDBstL61Gy3WCMtGwVaMN1p6w5wGfdDvP15",
+        },
+        .wayland_source = .{
+            .url = "https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.26.0/downloads/wayland-1.26.0.tar.xz",
+            .hash = "N-V-__8AAA46JQABKU7sa-6xGUAN44uFsYSUS_w79UVuu7qo",
+        },
+        .wayland_protocols = .{
+            .url = "https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.49/downloads/wayland-protocols-1.49.tar.xz",
+            .hash = "N-V-__8AAOTNEADZkChhsSciYizE4kIbZsozjDZXVeG5R_uY",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "protocols",
+        "gateway",
+        "Clipboard.zig",
+        "OutputManager.zig",
+        "RemoteInput.zig",
+        "VideoEncoder.zig",
+        "main.zig",
+    },
+}

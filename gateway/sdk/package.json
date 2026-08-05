@@ -1,0 +1,34 @@
+{
+  "name": "@rockorager/waymote",
+  "version": "0.1.0-dev.0",
+  "description": "Framework-free browser SDK for remote Wayland sessions",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./waymote.d.ts",
+      "default": "./waymote.js"
+    },
+    "./audio-player.js": "./audio-player.js"
+  },
+  "types": "./waymote.d.ts",
+  "files": [
+    "audio-player.js",
+    "waymote.d.ts",
+    "waymote.js",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./audio-player.js"
+  ],
+  "keywords": [
+    "waymote",
+    "wayland",
+    "wlroots",
+    "streaming",
+    "webcodecs"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

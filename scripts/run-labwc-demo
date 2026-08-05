@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+: "${PORT:?PORT must contain the HTTP listen port}"
+
+zig build install -Doptimize=ReleaseSafe
+
+runtime_directory="$(mktemp -d /tmp/waymote-labwc.XXXXXX)"
+export XDG_RUNTIME_DIR="$runtime_directory"
+chmod 700 "$runtime_directory"
+
+labwc_pid=
+session_client_pid=
+gateway_pid=
+audio_pid=
+cleanup() {
+    trap - EXIT INT TERM
+    for pid in "$gateway_pid" "$session_client_pid" "$labwc_pid" "$audio_pid"; do
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    done
+    for pid in "$gateway_pid" "$session_client_pid" "$labwc_pid" "$audio_pid"; do
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
+    rm -rf "$runtime_directory"
+}
+trap cleanup EXIT INT TERM
+
+export PULSE_SERVER="unix:$runtime_directory/pulse/native"
+pulseaudio --daemonize=no --exit-idle-time=-1 \
+    >"$runtime_directory/pulseaudio.log" 2>&1 &
+audio_pid=$!
+for _ in $(seq 1 200); do
+    if pactl info >/dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 "$audio_pid" 2>/dev/null; then
+        cat "$runtime_directory/pulseaudio.log" >&2
+        wait "$audio_pid"
+    fi
+    sleep 0.025
+done
+if ! pactl info >/dev/null 2>&1; then
+    echo "PulseAudio did not become ready" >&2
+    exit 1
+fi
+pactl load-module module-null-sink \
+    sink_name=waymote_session rate=48000 channels=2 >/dev/null
+export PULSE_SINK=waymote_session
+export KEYWORK_AUDIO_SOURCE=waymote_session.monitor
+
+export WLR_BACKENDS=headless
+export WLR_HEADLESS_OUTPUTS=1
+export WLR_LIBINPUT_NO_DEVICES=1
+export WLR_RENDERER=pixman
+labwc >"$runtime_directory/labwc.log" 2>&1 &
+labwc_pid=$!
+
+for _ in $(seq 1 200); do
+    socket="$(find "$runtime_directory" -maxdepth 1 -type s -name 'wayland-*' -printf '%f\n' | head -n 1)"
+    [[ -n "$socket" ]] && break
+    if ! kill -0 "$labwc_pid" 2>/dev/null; then
+        cat "$runtime_directory/labwc.log" >&2
+        wait "$labwc_pid"
+    fi
+    sleep 0.05
+done
+if [[ -z "${socket:-}" ]]; then
+    cat "$runtime_directory/labwc.log" >&2
+    echo "Labwc did not create a Wayland socket" >&2
+    exit 1
+fi
+export WAYLAND_DISPLAY="$socket"
+
+wayland-info >"$runtime_directory/wayland-info.log" 2>&1
+for protocol in zwlr_screencopy_manager_v1 zwlr_virtual_pointer_manager_v1 zwp_virtual_keyboard_manager_v1; do
+    if ! grep -q "interface: '$protocol'" "$runtime_directory/wayland-info.log"; then
+        echo "Labwc is missing required protocol $protocol" >&2
+        exit 1
+    fi
+done
+
+wlr-randr --output HEADLESS-1 --custom-mode 1280x720@30Hz
+
+if [[ -x /usr/lib/ioquake3/ioquake3 ]] && [[ -f /usr/lib/quake3/demo/demoq3/pak0.pk3 ]]; then
+    SDL_VIDEODRIVER=wayland SDL_AUDIODRIVER=pulseaudio LIBGL_ALWAYS_SOFTWARE=1 \
+        /usr/lib/ioquake3/ioquake3 \
+        +set com_homepath .q3ademo \
+        +set com_basegame demoq3 \
+        +set fs_basepath /usr/lib/quake3/demo \
+        +set sv_pure 0 \
+        +set vm_ui 0 +set vm_cgame 0 +set vm_game 0 \
+        +set r_fullscreen 1 +set r_mode -1 \
+        +set r_customwidth 1280 +set r_customheight 720 \
+        +map q3dm1 +addbot sarge 3 \
+        >"$runtime_directory/quake3.log" 2>&1 &
+else
+    foot --fullscreen --title "Waymote Labwc session" >"$runtime_directory/foot.log" 2>&1 &
+fi
+session_client_pid=$!
+
+zig-out/bin/waymote-gateway \
+    -listen "0.0.0.0:$PORT" \
+    -streamd zig-out/bin/waymote-streamd \
+    -frame-rate 30 \
+    -bitrate 8000 \
+    -fixed-width 1280 \
+    -fixed-height 720 &
+gateway_pid=$!
+wait "$gateway_pid"

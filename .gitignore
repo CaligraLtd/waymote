@@ -1,0 +1,4 @@
+/.zig-cache/
+/.amp/portals/
+/zig-pkg/
+/zig-out/
