@@ -154,6 +154,20 @@ export interface DisplayController {
   select(id: string): boolean;
 }
 
+export interface KeyEvent {
+  readonly phase: "down" | "repeat" | "up";
+  readonly code: string;
+  readonly key: string;
+  readonly linuxKey: number | null;
+  readonly forwarded: boolean;
+  readonly reason: string | null;
+  readonly repeat: boolean;
+  readonly ctrl: boolean;
+  readonly shift: boolean;
+  readonly alt: boolean;
+  readonly meta: boolean;
+}
+
 export interface WaymoteEventMap {
   readonly state: WaymoteSessionState;
   readonly stats: WaymoteStats;
@@ -161,6 +175,7 @@ export interface WaymoteEventMap {
   readonly resize: ResizeEvent;
   readonly quality: QualityEvent;
   readonly displays: DisplayState | null;
+  readonly key: KeyEvent;
   readonly error: Error;
 }
 

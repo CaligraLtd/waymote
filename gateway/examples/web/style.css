@@ -182,3 +182,40 @@ button:disabled {
     gap: 4px;
   }
 }
+
+.key-log {
+  margin-top: 12px;
+  border-top: 1px solid #232733;
+  padding-top: 8px;
+  color: #7f8797;
+  font-size: 12px;
+}
+
+.key-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.key-log ol {
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 190px;
+  overflow-y: auto;
+  list-style: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.key-log li {
+  padding: 1px 0;
+  white-space: pre;
+}
+
+.key-log .dropped {
+  color: #d98b6a;
+}
+
+.key-log .forwarded {
+  color: #7fb08a;
+}
