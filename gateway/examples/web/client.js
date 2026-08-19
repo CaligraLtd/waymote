@@ -12,6 +12,8 @@ const audioButton = document.querySelector("#audio");
 const audioStatus = document.querySelector("#audio-status");
 const pointerLockButton = document.querySelector("#pointer-lock");
 const fullscreenButton = document.querySelector("#fullscreen");
+const keyLogLines = document.querySelector("#key-log-lines");
+const keyLogClear = document.querySelector("#key-log-clear");
 const textInputButton = document.querySelector("#text-input");
 const sendClipboardButton = document.querySelector("#send-clipboard");
 const copyClipboardButton = document.querySelector("#copy-clipboard");
@@ -182,3 +184,50 @@ for (const button of document.querySelectorAll("button")) {
 
 session.connect();
 
+const keyLogLimit = 200;
+
+function appendKeyLog(text, className) {
+  const line = document.createElement("li");
+  line.textContent = text;
+  if (className) line.className = className;
+  keyLogLines.append(line);
+  while (keyLogLines.childElementCount > keyLogLimit) {
+    keyLogLines.firstElementChild.remove();
+  }
+  keyLogLines.scrollTop = keyLogLines.scrollHeight;
+}
+
+function modifierText(event) {
+  const held = [];
+  if (event.ctrl ?? event.ctrlKey) held.push("ctrl");
+  if (event.alt ?? event.altKey) held.push("alt");
+  if (event.shift ?? event.shiftKey) held.push("shift");
+  if (event.meta ?? event.metaKey) held.push("meta");
+  return held.length ? held.join("+") : "-";
+}
+
+// Logged in the capture phase on window, so a key that reaches the page but
+// never reaches the canvas is distinguishable from one the desktop swallowed
+// before the browser saw it at all.
+for (const phase of ["keydown", "keyup"]) {
+  window.addEventListener(phase, (event) => {
+    appendKeyLog(
+      `page  ${phase === "keydown" ? "down" : "up  "}  ${event.code.padEnd(14)} ` +
+      `key=${JSON.stringify(event.key).padEnd(10)} mods=${modifierText(event)}`,
+    );
+  }, true);
+}
+
+session.on("key", (event) => {
+  const target = event.forwarded ? "sent" : "drop";
+  appendKeyLog(
+    `${target}  ${event.phase.padEnd(6)}${event.code.padEnd(14)} ` +
+    `linux=${String(event.linuxKey ?? "-").padEnd(5)} mods=${modifierText(event)}` +
+    (event.reason ? ` (${event.reason})` : ""),
+    event.forwarded ? "forwarded" : "dropped",
+  );
+});
+
+keyLogClear.addEventListener("click", () => {
+  keyLogLines.replaceChildren();
+});

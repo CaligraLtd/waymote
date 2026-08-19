@@ -118,12 +118,27 @@ export interface QualityEvent {
   readonly scalePercent: number;
 }
 
+export interface KeyEvent {
+  readonly phase: "down" | "repeat" | "up";
+  readonly code: string;
+  readonly key: string;
+  readonly linuxKey: number | null;
+  readonly forwarded: boolean;
+  readonly reason: string | null;
+  readonly repeat: boolean;
+  readonly ctrl: boolean;
+  readonly shift: boolean;
+  readonly alt: boolean;
+  readonly meta: boolean;
+}
+
 export interface WaymoteEventMap {
   readonly state: WaymoteSessionState;
   readonly stats: WaymoteStats;
   readonly clipboard: ClipboardEvent;
   readonly resize: ResizeEvent;
   readonly quality: QualityEvent;
+  readonly key: KeyEvent;
   readonly error: Error;
 }
 
