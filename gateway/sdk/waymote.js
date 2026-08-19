@@ -1160,12 +1160,30 @@ function handleWheel(event) {
   event.preventDefault();
 }
 
+function emitKey(phase, event, linuxKey, forwarded, reason) {
+  emit("key", Object.freeze({
+    phase,
+    code: event.code,
+    key: event.key,
+    linuxKey: linuxKey ?? null,
+    forwarded,
+    reason: reason ?? null,
+    repeat: Boolean(event.repeat),
+    ctrl: event.ctrlKey,
+    shift: event.shiftKey,
+    alt: event.altKey,
+    meta: event.metaKey,
+  }));
+}
+
 function handleKeyDown(event) {
   if (event.isComposing || event.keyCode === 229) {
+    emitKey("down", event, null, false, "composing");
     return;
   }
   const key = linuxKeyCodes.get(event.code);
   if (key === undefined) {
+    emitKey("down", event, null, false, "unmapped");
     return;
   }
   if ((event.ctrlKey || event.metaKey) && event.code === "KeyV") {
@@ -1182,6 +1200,7 @@ function handleKeyDown(event) {
         clipboardPastePending = false;
       });
     }
+    emitKey("down", event, key, true, "clipboard-paste");
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -1192,6 +1211,7 @@ function handleKeyDown(event) {
       reserveRemoteClipboardCopy();
       tapRemoteKey(key, shortcutModifiers(event));
     }
+    emitKey("down", event, key, true, "clipboard-copy");
     event.preventDefault();
     event.stopPropagation();
     return;
@@ -1199,8 +1219,12 @@ function handleKeyDown(event) {
   if (!pressedKeys.has(key)) {
     pressedKeys.add(key);
     sendControl(keyboardRecord(key, keyPressed));
+    emitKey("down", event, key, true);
   } else if (event.repeat) {
     sendControl(keyboardRecord(key, keyRepeated));
+    emitKey("repeat", event, key, true);
+  } else {
+    emitKey("down", event, key, false, "already-held");
   }
   physicalTextPending = event.key?.length === 1 && !event.ctrlKey && !event.metaKey;
   event.preventDefault();
@@ -1209,10 +1233,12 @@ function handleKeyDown(event) {
 
 function handleKeyUp(event) {
   if (event.isComposing || event.keyCode === 229) {
+    emitKey("up", event, null, false, "composing");
     return;
   }
   const key = linuxKeyCodes.get(event.code);
   if (key === undefined) {
+    emitKey("up", event, null, false, "unmapped");
     return;
   }
   if (event.code === "KeyC" || event.code === "ShiftLeft" || event.code === "ShiftRight" ||
@@ -1222,6 +1248,9 @@ function handleKeyUp(event) {
   }
   if (pressedKeys.delete(key)) {
     sendControl(keyboardRecord(key, keyReleased));
+    emitKey("up", event, key, true);
+  } else {
+    emitKey("up", event, key, false, "not-held");
   }
   physicalTextPending = false;
   event.preventDefault();

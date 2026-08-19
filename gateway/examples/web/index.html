@@ -45,6 +45,13 @@
         <span id="metrics">No frames yet</span>
         <input id="ime-proxy" class="ime-proxy" aria-label="Text input" autocomplete="off">
       </footer>
+      <section class="key-log" aria-label="Key debug log">
+        <div class="key-log-head">
+          <span>Key log · received by page → forwarded to remote</span>
+          <button id="key-log-clear" type="button">Clear</button>
+        </div>
+        <ol id="key-log-lines"></ol>
+      </section>
     </main>
     <script type="module" src="/client.js"></script>
   </body>
