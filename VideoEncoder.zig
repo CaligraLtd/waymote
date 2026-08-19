@@ -39,6 +39,8 @@ pub const Options = struct {
     rtp_port: ?u16,
 };
 
+pub const PixelFormat = ColorConvert.PixelFormat;
+
 /// A half-open range of captured rows.
 pub const Rows = struct {
     first: u32,
@@ -55,6 +57,7 @@ pub const Metadata = struct {
     raw_height: u32,
     encoded_width: u16,
     encoded_height: u16,
+    pixel_format: PixelFormat,
     capture_nanos: u64,
     sequence: u64,
     input_sequence: u32,
@@ -69,6 +72,7 @@ pub const Metadata = struct {
             .raw_height = self.raw_height,
             .encoded_width = self.encoded_width,
             .encoded_height = self.encoded_height,
+            .pixel_format = self.pixel_format,
             .fps = self.fps,
             .bitrate_kbps = self.bitrate_kbps,
         };
@@ -100,6 +104,7 @@ const Config = struct {
     raw_height: u32,
     encoded_width: u16,
     encoded_height: u16,
+    pixel_format: PixelFormat,
     fps: u32,
     bitrate_kbps: u32,
 };
@@ -191,7 +196,13 @@ const Encoder = struct {
             .end = @min(@as(u32, @intCast(height)), (damage.end + 1) & ~@as(u32, 1)),
         } else .{ .first = 0, .end = @intCast(height) };
         ColorConvert.convert(
-            .{ .data = data, .width = raw_width, .height = raw_height, .stride = raw_width * 4 },
+            .{
+                .data = data,
+                .width = raw_width,
+                .height = raw_height,
+                .stride = raw_width * 4,
+                .format = self.config.pixel_format,
+            },
             width,
             height,
             .{
@@ -734,6 +745,7 @@ test "new captures replace only the pending encoder frame" {
         .raw_height = 2,
         .encoded_width = 2,
         .encoded_height = 2,
+        .pixel_format = .bgra,
         .capture_nanos = 1,
         .sequence = 1,
         .input_sequence = 0,
@@ -773,6 +785,7 @@ test "an encoded keyframe starts with headers and an IDR slice" {
         .raw_height = 32,
         .encoded_width = 64,
         .encoded_height = 32,
+        .pixel_format = .bgra,
         .fps = 30,
         .bitrate_kbps = 1000,
     }, 1, 1);
@@ -796,6 +809,7 @@ test "a requested keyframe interrupts the GOP" {
         .raw_height = 32,
         .encoded_width = 64,
         .encoded_height = 32,
+        .pixel_format = .bgra,
         .fps = 30,
         .bitrate_kbps = 1000,
     }, 1, 1);
@@ -823,6 +837,7 @@ test "after a full frame only damaged rows, widened to whole chroma rows, are co
         .raw_height = 8,
         .encoded_width = 32,
         .encoded_height = 8,
+        .pixel_format = .bgra,
         .fps = 30,
         .bitrate_kbps = 1000,
     }, 1, 1);

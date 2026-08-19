@@ -1,4 +1,4 @@
-//! Converts captured BGRX/BGRA frames to the I420 planes x264 encodes.
+//! Converts captured BGRA or RGBA frames to the I420 planes x264 encodes.
 //!
 //! Colors use BT.601 limited range, the same matrix FFmpeg's swscale applies
 //! for `-pix_fmt yuv420p`, so streams decode with the colors they had before.
@@ -21,11 +21,26 @@ pub const Planes = struct {
     chroma_stride: usize,
 };
 
+/// Byte order of a captured pixel; the fourth byte is unused.
+pub const PixelFormat = enum {
+    bgra,
+    rgba,
+
+    fn redOffset(comptime self: PixelFormat) usize {
+        return if (self == .bgra) 2 else 0;
+    }
+
+    fn blueOffset(comptime self: PixelFormat) usize {
+        return 2 - self.redOffset();
+    }
+};
+
 pub const Source = struct {
     data: []const u8,
     width: usize,
     height: usize,
     stride: usize,
+    format: PixelFormat = .bgra,
 };
 
 /// Rows `[first_row, end_row)` of the destination are written; both bounds
@@ -41,10 +56,12 @@ pub fn convert(
     @setRuntimeSafety(runtime_safety);
     std.debug.assert(width % 2 == 0 and height % 2 == 0);
     std.debug.assert(first_row % 2 == 0 and end_row % 2 == 0 and end_row <= height);
-    if (source.width == width and source.height == height) {
-        convertSameSize(source, width, planes, first_row, end_row);
-    } else {
-        convertScaled(source, width, height, planes, first_row, end_row);
+    switch (source.format) {
+        inline else => |format| if (source.width == width and source.height == height) {
+            convertSameSize(format, source, width, planes, first_row, end_row);
+        } else {
+            convertScaled(format, source, width, height, planes, first_row, end_row);
+        },
     }
 }
 
@@ -71,13 +88,13 @@ fn laneMask(comptime stride: usize, comptime offset: usize, comptime count: usiz
     return mask;
 }
 
-/// Splits 16 BGRA pixels into widened blue, green, and red channels.
-inline fn splitChannels(pixels: [*]const u8) [3]Channel {
+/// Splits 16 pixels into widened blue, green, and red channels.
+inline fn splitChannels(comptime format: PixelFormat, pixels: [*]const u8) [3]Channel {
     const block: PixelBlock = pixels[0 .. 4 * lanes].*;
     return .{
-        @shuffle(u8, block, undefined, laneMask(4, 0, lanes)),
+        @shuffle(u8, block, undefined, laneMask(4, format.blueOffset(), lanes)),
         @shuffle(u8, block, undefined, laneMask(4, 1, lanes)),
-        @shuffle(u8, block, undefined, laneMask(4, 2, lanes)),
+        @shuffle(u8, block, undefined, laneMask(4, format.redOffset(), lanes)),
     };
 }
 
@@ -110,6 +127,7 @@ inline fn chromaVector(
 }
 
 fn convertSameSize(
+    comptime format: PixelFormat,
     source: Source,
     width: usize,
     planes: Planes,
@@ -130,8 +148,8 @@ fn convertSameSize(
         const v_row = planes.v.ptr + row / 2 * planes.chroma_stride;
         var x: usize = 0;
         while (x < vector_width) : (x += lanes) {
-            const upper = splitChannels(top + 4 * x);
-            const lower = splitChannels(bottom + 4 * x);
+            const upper = splitChannels(format, top + 4 * x);
+            const lower = splitChannels(format, bottom + 4 * x);
             y_top[x..][0..lanes].* = lumaVector(upper);
             y_bottom[x..][0..lanes].* = lumaVector(lower);
             const b = blockAverage(upper[0], lower[0]);
@@ -140,11 +158,12 @@ fn convertSameSize(
             u_row[x / 2 ..][0 .. lanes / 2].* = chromaVector(r, g, b, .{ -38, -74, 112 });
             v_row[x / 2 ..][0 .. lanes / 2].* = chromaVector(r, g, b, .{ 112, -94, -18 });
         }
-        convertScalar(top, bottom, y_top, y_bottom, u_row, v_row, vector_width, width);
+        convertScalar(format, top, bottom, y_top, y_bottom, u_row, v_row, vector_width, width);
     }
 }
 
 fn convertScalar(
+    comptime format: PixelFormat,
     top: [*]const u8,
     bottom: [*]const u8,
     y_top: [*]u8,
@@ -156,17 +175,19 @@ fn convertScalar(
 ) void {
     @setRuntimeSafety(runtime_safety);
     @setRuntimeSafety(false);
+    const r_offset = comptime format.redOffset();
+    const b_offset = comptime format.blueOffset();
     for (first_column..width) |x| {
-        y_top[x] = luma(top[4 * x + 2], top[4 * x + 1], top[4 * x]);
-        y_bottom[x] = luma(bottom[4 * x + 2], bottom[4 * x + 1], bottom[4 * x]);
+        y_top[x] = luma(top[4 * x + r_offset], top[4 * x + 1], top[4 * x + b_offset]);
+        y_bottom[x] = luma(bottom[4 * x + r_offset], bottom[4 * x + 1], bottom[4 * x + b_offset]);
     }
     for (first_column / 2..width / 2) |x| {
-        const b: i32 = (@as(i32, top[8 * x]) + top[8 * x + 4] +
-            bottom[8 * x] + bottom[8 * x + 4] + 2) >> 2;
+        const b: i32 = (@as(i32, top[8 * x + b_offset]) + top[8 * x + 4 + b_offset] +
+            bottom[8 * x + b_offset] + bottom[8 * x + 4 + b_offset] + 2) >> 2;
         const g: i32 = (@as(i32, top[8 * x + 1]) + top[8 * x + 5] +
             bottom[8 * x + 1] + bottom[8 * x + 5] + 2) >> 2;
-        const r: i32 = (@as(i32, top[8 * x + 2]) + top[8 * x + 6] +
-            bottom[8 * x + 2] + bottom[8 * x + 6] + 2) >> 2;
+        const r: i32 = (@as(i32, top[8 * x + r_offset]) + top[8 * x + 4 + r_offset] +
+            bottom[8 * x + r_offset] + bottom[8 * x + 4 + r_offset] + 2) >> 2;
         u_row[x] = chromaU(r, g, b);
         v_row[x] = chromaV(r, g, b);
     }
@@ -175,7 +196,7 @@ fn convertScalar(
 const Rgb = struct { r: u32, g: u32, b: u32 };
 
 /// Bilinear sample at a 16.16 fixed-point source position.
-fn sample(source: Source, fx: u64, fy: u64) Rgb {
+fn sample(comptime format: PixelFormat, source: Source, fx: u64, fy: u64) Rgb {
     @setRuntimeSafety(runtime_safety);
     const x0: usize = @intCast(fx >> 16);
     const y0: usize = @intCast(fy >> 16);
@@ -193,7 +214,11 @@ fn sample(source: Source, fx: u64, fy: u64) Rgb {
         const bottom = @as(u64, p01[channel]) * (0x10000 - wx) + @as(u64, p11[channel]) * wx;
         channels[channel] = @intCast((top * (0x10000 - wy) + bottom * wy + (1 << 31)) >> 32);
     }
-    return .{ .b = channels[0], .g = channels[1], .r = channels[2] };
+    return .{
+        .b = channels[format.blueOffset()],
+        .g = channels[1],
+        .r = channels[format.redOffset()],
+    };
 }
 
 fn sourcePosition(output: usize, output_size: usize, source_size: usize) u64 {
@@ -206,6 +231,7 @@ fn sourcePosition(output: usize, output_size: usize, source_size: usize) u64 {
 }
 
 fn convertScaled(
+    comptime format: PixelFormat,
     source: Source,
     width: usize,
     height: usize,
@@ -223,8 +249,8 @@ fn convertScaled(
             const fx0 = sourcePosition(x, width, source.width);
             const fx1 = sourcePosition(x + 1, width, source.width);
             const pixels = [4]Rgb{
-                sample(source, fx0, fy0), sample(source, fx1, fy0),
-                sample(source, fx0, fy1), sample(source, fx1, fy1),
+                sample(format, source, fx0, fy0), sample(format, source, fx1, fy0),
+                sample(format, source, fx0, fy1), sample(format, source, fx1, fy1),
             };
             planes.y[row * planes.y_stride + x] = luma(pixels[0].r, pixels[0].g, pixels[0].b);
             planes.y[row * planes.y_stride + x + 1] = luma(pixels[1].r, pixels[1].g, pixels[1].b);
@@ -378,6 +404,7 @@ test "vector path matches the scalar path on varied pixels" {
     var row: usize = 0;
     while (row < height) : (row += 2) {
         convertScalar(
+            .bgra,
             pixels[row * width * 4 ..].ptr,
             pixels[(row + 1) * width * 4 ..].ptr,
             scalar.y[row * width ..].ptr,
@@ -391,4 +418,45 @@ test "vector path matches the scalar path on varied pixels" {
     try std.testing.expectEqualSlices(u8, &scalar.y, &vector.y);
     try std.testing.expectEqualSlices(u8, &scalar.u, &vector.u);
     try std.testing.expectEqualSlices(u8, &scalar.v, &vector.v);
+}
+
+test "rgba sources convert like the same colors in bgra order" {
+    // 36 columns cover the vector path and the scalar tail, and halve to an
+    // even width.
+    const width = 36;
+    const height = 4;
+    var bgra: [width * height * 4]u8 = undefined;
+    var state: u32 = 54321;
+    for (&bgra) |*byte| {
+        state = state *% 1103515245 +% 12345;
+        byte.* = @truncate(state >> 16);
+    }
+    var rgba = bgra;
+    for (0..width * height) |index| {
+        std.mem.swap(u8, &rgba[4 * index], &rgba[4 * index + 2]);
+    }
+    // The same-size path, then a downscale through the bilinear sampler.
+    inline for (.{ .{ width, height }, .{ width / 2, height / 2 } }) |size| {
+        var expected = testPlanes(size[0], size[1]);
+        var actual = testPlanes(size[0], size[1]);
+        inline for (.{ .{ &bgra, .bgra, &expected }, .{ &rgba, .rgba, &actual } }) |case| {
+            convert(
+                .{ .data = case[0], .width = width, .height = height, .stride = width * 4, .format = case[1] },
+                size[0],
+                size[1],
+                .{
+                    .y = &case[2].y,
+                    .u = &case[2].u,
+                    .v = &case[2].v,
+                    .y_stride = size[0],
+                    .chroma_stride = size[0] / 2,
+                },
+                0,
+                size[1],
+            );
+        }
+        try std.testing.expectEqualSlices(u8, &expected.y, &actual.y);
+        try std.testing.expectEqualSlices(u8, &expected.u, &actual.u);
+        try std.testing.expectEqualSlices(u8, &expected.v, &actual.v);
+    }
 }
