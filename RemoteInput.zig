@@ -4,10 +4,13 @@ const RemoteInput = @This();
 
 const std = @import("std");
 const wayland = @import("wayland");
+const UinputKeyboard = @import("UinputKeyboard.zig");
 
 const wl = wayland.client.wl;
 const zwlr = wayland.client.zwlr;
 const zwp = wayland.client.zwp;
+
+const log = std.log.scoped(.remote_input);
 
 const xkb = @cImport({
     @cInclude("stdlib.h");
@@ -26,6 +29,8 @@ const CommandType = enum(u8) {
     release_all = 5,
     pointer_relative = 8,
 };
+
+pub const Backend = enum { wayland, uinput };
 
 pub const KeyState = enum(u8) {
     released = 0,
@@ -62,11 +67,23 @@ pressed_keys: [256]bool = @splat(false),
 held_keysyms: [256]u32 = @splat(0),
 resolved_keysyms: [256]u32 = @splat(0),
 pressed_buttons: [5]bool = @splat(false),
+uinput: ?UinputKeyboard = null,
+backend: Backend = .wayland,
+// Keys held through uinput, and the unmodified host keymap that decides
+// whether a resolved keysym can take that route.
+uinput_keys: [256]bool = @splat(false),
+host_keymap: ?*xkb.struct_xkb_keymap = null,
+host_state: ?*xkb.struct_xkb_state = null,
 
 layout: [:0]const u8 = "us",
 
-pub fn init(allocator: std.mem.Allocator, io: std.Io, layout: [:0]const u8) RemoteInput {
-    return .{ .allocator = allocator, .io = io, .layout = layout };
+pub fn init(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    layout: [:0]const u8,
+    backend: Backend,
+) RemoteInput {
+    return .{ .allocator = allocator, .io = io, .layout = layout, .backend = backend };
 }
 
 pub fn bindGlobal(
@@ -119,6 +136,20 @@ pub fn start(self: *RemoteInput, output: *wl.Output) !void {
         try pointer_manager.createVirtualPointer(seat);
     self.keyboard = try keyboard_manager.createVirtualKeyboard(seat);
     try self.installKeymap();
+    if (self.backend == .uinput) {
+        // Text input keeps the Wayland keyboard, which can carry a synthesized
+        // keymap for characters no evdev code produces.
+        self.uinput = UinputKeyboard.open(self.io) catch |err| blk: {
+            log.warn("uinput unavailable, falling back to the Wayland keyboard: {t}", .{err});
+            self.backend = .wayland;
+            break :blk null;
+        };
+        if (self.uinput != null) {
+            self.host_keymap = try self.compileBaseKeymap();
+            self.host_state = xkb.xkb_state_new(self.host_keymap.?) orelse
+                return error.XkbStateFailed;
+        }
+    }
     if (self.input_method_manager) |manager| {
         self.input_method = try manager.getInputMethod(seat);
         self.input_method.?.setListener(*RemoteInput, inputMethodListener, self);
@@ -127,6 +158,7 @@ pub fn start(self: *RemoteInput, output: *wl.Output) !void {
 
 pub fn deinit(self: *RemoteInput) void {
     self.releaseAll();
+    if (self.uinput) |*keyboard| keyboard.deinit(self.io);
     if (self.pointer) |pointer| pointer.destroy();
     if (self.input_method) |method| method.destroy();
     if (self.input_method_manager) |manager| manager.destroy();
@@ -134,6 +166,8 @@ pub fn deinit(self: *RemoteInput) void {
     if (self.keymap_file) |file| file.close(self.io);
     if (self.xkb_state) |state| xkb.xkb_state_unref(state);
     if (self.xkb_keymap) |keymap| xkb.xkb_keymap_unref(keymap);
+    if (self.host_state) |state| xkb.xkb_state_unref(state);
+    if (self.host_keymap) |keymap| xkb.xkb_keymap_unref(keymap);
     if (self.xkb_context) |context| xkb.xkb_context_unref(context);
     if (self.pointer_manager) |manager| manager.destroy();
     if (self.keyboard_manager) |manager| manager.destroy();
@@ -228,21 +262,7 @@ pub fn decodeRecord(record: *const [record_size]u8) !Command {
 }
 
 fn installKeymap(self: *RemoteInput) !void {
-    if (self.xkb_context == null) {
-        self.xkb_context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
-            return error.XkbContextFailed;
-    }
-    const base_keymap = xkb.xkb_keymap_new_from_names(
-        self.xkb_context.?,
-        &xkb.struct_xkb_rule_names{
-            .rules = null,
-            .model = null,
-            .layout = self.layout.ptr,
-            .variant = null,
-            .options = null,
-        },
-        xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
-    ) orelse return error.XkbKeymapFailed;
+    const base_keymap = try self.compileBaseKeymap();
     defer xkb.xkb_keymap_unref(base_keymap);
     const source = try keymapSource(self.allocator, base_keymap, &self.resolved_keysyms);
     defer self.allocator.free(source);
@@ -285,6 +305,24 @@ fn installKeymap(self: *RemoteInput) !void {
     // still restore held Ctrl/Alt/etc. before the next physical shortcut.
     self.sendNeutralModifiers();
     self.sendModifiers();
+}
+
+fn compileBaseKeymap(self: *RemoteInput) !*xkb.struct_xkb_keymap {
+    if (self.xkb_context == null) {
+        self.xkb_context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
+            return error.XkbContextFailed;
+    }
+    return xkb.xkb_keymap_new_from_names(
+        self.xkb_context.?,
+        &xkb.struct_xkb_rule_names{
+            .rules = null,
+            .model = null,
+            .layout = self.layout.ptr,
+            .variant = null,
+            .options = null,
+        },
+        xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+    ) orelse error.XkbKeymapFailed;
 }
 
 fn restoreXKBState(
@@ -399,6 +437,9 @@ fn applyButton(self: *RemoteInput, time: u32, button: u32, pressed: bool) void {
 
 fn applyKey(self: *RemoteInput, time: u32, key: u32, keysym: u32, state: KeyState) void {
     if (key == 0 or key >= self.pressed_keys.len) return;
+    if (self.uinput) |*uinput| {
+        if (self.applyKeyUinput(uinput, key, keysym, state)) return;
+    }
     const keyboard = self.keyboard orelse return;
     const pressed = state == .pressed;
     if (state == .repeated) {
@@ -445,6 +486,47 @@ fn sendNeutralModifiers(self: *RemoteInput) void {
     self.keyboard.?.modifiers(0, 0, 0, 0);
 }
 
+/// Returns false when the key belongs on the Wayland keyboard instead: a
+/// press whose browser-resolved character the host keymap would not produce,
+/// or a repeat or release of a key that was pressed that way.
+fn applyKeyUinput(
+    self: *RemoteInput,
+    uinput: *UinputKeyboard,
+    key: u32,
+    keysym: u32,
+    state: KeyState,
+) bool {
+    switch (state) {
+        .repeated => {
+            if (!self.uinput_keys[key]) return !self.pressed_keys[key];
+            uinput.key(self.io, key, 2);
+        },
+        .pressed => {
+            if (self.pressed_keys[key]) return true;
+            if (keysym != 0 and !hostProduces(self.host_state.?, key, keysym)) return false;
+            self.pressed_keys[key] = true;
+            self.uinput_keys[key] = true;
+            _ = xkb.xkb_state_update_key(self.host_state.?, key + 8, xkb.XKB_KEY_DOWN);
+            uinput.key(self.io, key, 1);
+        },
+        .released => {
+            if (!self.uinput_keys[key]) return !self.pressed_keys[key];
+            self.pressed_keys[key] = false;
+            self.uinput_keys[key] = false;
+            _ = xkb.xkb_state_update_key(self.host_state.?, key + 8, xkb.XKB_KEY_UP);
+            uinput.key(self.io, key, 0);
+        },
+    }
+    return true;
+}
+
+/// Whether the host keymap, in its current modifier state, types the same
+/// character for `key` as the browser resolved.
+fn hostProduces(state: *xkb.struct_xkb_state, key: u32, keysym: u32) bool {
+    const expected = xkb.xkb_keysym_to_utf32(keysym);
+    return expected != 0 and xkb.xkb_state_key_get_utf32(state, key + 8) == expected;
+}
+
 fn sendModifiers(self: *RemoteInput) void {
     const state = self.xkb_state orelse return;
     self.keyboard.?.modifiers(
@@ -472,6 +554,12 @@ pub fn releaseAll(self: *RemoteInput) void {
         pressed.* = false;
         self.held_keysyms[key] = 0;
         released_key = true;
+        if (self.uinput_keys[key]) {
+            self.uinput_keys[key] = false;
+            _ = xkb.xkb_state_update_key(self.host_state.?, @intCast(key + 8), xkb.XKB_KEY_UP);
+            self.uinput.?.key(self.io, @intCast(key), 0);
+            continue;
+        }
         if (self.keyboard) |keyboard| {
             keyboard.key(time, @intCast(key), @intFromEnum(wl.Keyboard.KeyState.released));
         }
@@ -715,4 +803,36 @@ test "remote input records reject out of range pointer coordinates" {
     record[1] = @intFromEnum(CommandType.pointer_motion);
     std.mem.writeInt(u32, record[4..8], pointer_extent + 1, .little);
     try std.testing.expectError(error.InvalidInputRecord, decodeRecord(&record));
+}
+
+test "uinput routing keeps characters the host keymap types" {
+    const context = xkb.xkb_context_new(xkb.XKB_CONTEXT_NO_FLAGS) orelse
+        return error.XkbContextFailed;
+    defer xkb.xkb_context_unref(context);
+    const keymap = xkb.xkb_keymap_new_from_names(
+        context,
+        &xkb.struct_xkb_rule_names{
+            .rules = null,
+            .model = null,
+            .layout = "us",
+            .variant = null,
+            .options = null,
+        },
+        xkb.XKB_KEYMAP_COMPILE_NO_FLAGS,
+    ) orelse return error.XkbKeymapFailed;
+    defer xkb.xkb_keymap_unref(keymap);
+    const state = xkb.xkb_state_new(keymap) orelse return error.XkbStateFailed;
+    defer xkb.xkb_state_unref(state);
+
+    try std.testing.expect(hostProduces(state, 30, 'a'));
+    try std.testing.expect(!hostProduces(state, 30, 'A'));
+    // A German browser types "z" on the US "y" key and "ü" on "[".
+    try std.testing.expect(!hostProduces(state, 21, 'z'));
+    try std.testing.expect(!hostProduces(state, 26, 0xfc));
+    try std.testing.expect(!hostProduces(state, 26, 0x010000fc));
+
+    _ = xkb.xkb_state_update_key(state, 42 + 8, xkb.XKB_KEY_DOWN);
+    try std.testing.expect(hostProduces(state, 30, 'A'));
+    try std.testing.expect(hostProduces(state, 3, '@'));
+    try std.testing.expect(!hostProduces(state, 3, '"'));
 }
