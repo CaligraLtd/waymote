@@ -22,12 +22,25 @@ pub const Options = struct {
     rtp_port: ?u16,
 };
 
+pub const PixelFormat = enum {
+    bgra,
+    rgba,
+
+    fn ffmpegName(self: PixelFormat) []const u8 {
+        return switch (self) {
+            .bgra => "bgra",
+            .rgba => "rgba",
+        };
+    }
+};
+
 pub const Metadata = struct {
     generation: u32,
     raw_width: u32,
     raw_height: u32,
     encoded_width: u16,
     encoded_height: u16,
+    pixel_format: PixelFormat,
     capture_nanos: u64,
     sequence: u64,
     input_sequence: u32,
@@ -40,6 +53,7 @@ pub const Metadata = struct {
             .raw_height = self.raw_height,
             .encoded_width = self.encoded_width,
             .encoded_height = self.encoded_height,
+            .pixel_format = self.pixel_format,
             .fps = self.fps,
             .bitrate_kbps = self.bitrate_kbps,
         };
@@ -71,6 +85,7 @@ const Config = struct {
     raw_height: u32,
     encoded_width: u16,
     encoded_height: u16,
+    pixel_format: PixelFormat,
     fps: u32,
     bitrate_kbps: u32,
 };
@@ -427,7 +442,7 @@ fn startProcess(self: *VideoEncoder, config: Config, generation: u32, ssrc: u32)
         "-f",
         "rawvideo",
         "-pixel_format",
-        "bgra",
+        config.pixel_format.ffmpegName(),
         "-video_size",
         size,
         "-framerate",
@@ -620,6 +635,7 @@ test "new captures replace only the pending encoder frame" {
         .raw_height = 2,
         .encoded_width = 2,
         .encoded_height = 2,
+        .pixel_format = .bgra,
         .capture_nanos = 1,
         .sequence = 1,
         .input_sequence = 0,
