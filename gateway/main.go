@@ -967,6 +967,7 @@ func main() {
 	fixedHeight := flag.Uint("fixed-height", 0, "fixed output height (zero allows client resizing)")
 	audioSource := flag.String("audio-source", os.Getenv("WAYMOTE_AUDIO_SOURCE"), "PulseAudio monitor source (empty disables audio)")
 	xkbLayout := flag.String("xkb-layout", os.Getenv("XKB_DEFAULT_LAYOUT"), "XKB keyboard layout")
+	inputBackend := flag.String("input-backend", "wayland", "keyboard injection backend: wayland or uinput")
 	publicURL := flag.String("public-url", os.Getenv("PUBLIC_URL"), "public gateway URL allowed as a WebSocket origin")
 	showVersion := flag.Bool("version", false, "show the Waymote version")
 	flag.Parse()
@@ -998,6 +999,9 @@ func main() {
 	if *xkbLayout == "" {
 		*xkbLayout = "us"
 	}
+	if *inputBackend != "wayland" && *inputBackend != "uinput" {
+		log.Fatalf("invalid -input-backend %q, want wayland or uinput", *inputBackend)
+	}
 	if !validXKBLayout(*xkbLayout) {
 		log.Fatal("invalid xkb-layout")
 	}
@@ -1014,7 +1018,7 @@ func main() {
 	clipboard := &clipboardBridge{}
 	events := &messageBridge{}
 	go func() {
-		if err := runEncoder(ctx, hub, audio, input, clipboard, events, *streamdPath, *frameRate, *bitrate, *xkbLayout, *audioSource); err != nil && !errors.Is(err, context.Canceled) {
+		if err := runEncoder(ctx, hub, audio, input, clipboard, events, *streamdPath, *frameRate, *bitrate, *xkbLayout, *inputBackend, *audioSource); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("stream encoder stopped: %v", err)
 			stop()
 		}
@@ -1123,6 +1127,7 @@ func runEncoder(
 	frameRate uint64,
 	bitrate uint64,
 	xkbLayout string,
+	inputBackend string,
 	audioSource string,
 ) error {
 	rtp, rtpPort, err := listenLoopbackRTP()
@@ -1139,6 +1144,8 @@ func runEncoder(
 		strconv.Itoa(rtpPort),
 		"--xkb-layout",
 		xkbLayout,
+		"--input-backend",
+		inputBackend,
 	}
 	var audioRTP *net.UDPConn
 	if audioSource != "" {

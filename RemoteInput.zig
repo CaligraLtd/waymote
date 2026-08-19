@@ -4,10 +4,13 @@ const RemoteInput = @This();
 
 const std = @import("std");
 const wayland = @import("wayland");
+const UinputKeyboard = @import("UinputKeyboard.zig");
 
 const wl = wayland.client.wl;
 const zwlr = wayland.client.zwlr;
 const zwp = wayland.client.zwp;
+
+const log = std.log.scoped(.remote_input);
 
 const xkb = @cImport({
     @cInclude("stdlib.h");
@@ -26,6 +29,8 @@ const CommandType = enum(u8) {
     release_all = 5,
     pointer_relative = 8,
 };
+
+pub const Backend = enum { wayland, uinput };
 
 pub const KeyState = enum(u8) {
     released = 0,
@@ -59,11 +64,13 @@ xkb_keymap: ?*xkb.struct_xkb_keymap = null,
 xkb_state: ?*xkb.struct_xkb_state = null,
 pressed_keys: [256]bool = @splat(false),
 pressed_buttons: [5]bool = @splat(false),
+uinput: ?UinputKeyboard = null,
+backend: Backend = .wayland,
 
 layout: [:0]const u8 = "us",
 
-pub fn init(io: std.Io, layout: [:0]const u8) RemoteInput {
-    return .{ .io = io, .layout = layout };
+pub fn init(io: std.Io, layout: [:0]const u8, backend: Backend) RemoteInput {
+    return .{ .io = io, .layout = layout, .backend = backend };
 }
 
 pub fn bindGlobal(
@@ -116,6 +123,15 @@ pub fn start(self: *RemoteInput, output: *wl.Output) !void {
         try pointer_manager.createVirtualPointer(seat);
     self.keyboard = try keyboard_manager.createVirtualKeyboard(seat);
     try self.installKeymap();
+    if (self.backend == .uinput) {
+        // Text input keeps the Wayland keyboard, which can carry a synthesized
+        // keymap for characters no evdev code produces.
+        self.uinput = UinputKeyboard.open(self.io) catch |err| blk: {
+            log.warn("uinput unavailable, falling back to the Wayland keyboard: {t}", .{err});
+            self.backend = .wayland;
+            break :blk null;
+        };
+    }
     if (self.input_method_manager) |manager| {
         self.input_method = try manager.getInputMethod(seat);
         self.input_method.?.setListener(*RemoteInput, inputMethodListener, self);
@@ -124,6 +140,7 @@ pub fn start(self: *RemoteInput, output: *wl.Output) !void {
 
 pub fn deinit(self: *RemoteInput) void {
     self.releaseAll();
+    if (self.uinput) |*keyboard| keyboard.deinit(self.io);
     if (self.pointer) |pointer| pointer.destroy();
     if (self.input_method) |method| method.destroy();
     if (self.input_method_manager) |manager| manager.destroy();
@@ -314,6 +331,7 @@ fn applyButton(self: *RemoteInput, time: u32, button: u32, pressed: bool) void {
 
 fn applyKey(self: *RemoteInput, time: u32, key: u32, state: KeyState) void {
     if (key == 0 or key >= self.pressed_keys.len) return;
+    if (self.uinput) |*uinput| return self.applyKeyUinput(uinput, key, state);
     const keyboard = self.keyboard orelse return;
     if (state == .repeated) {
         if (!self.pressed_keys[key]) return;
@@ -333,6 +351,18 @@ fn applyKey(self: *RemoteInput, time: u32, key: u32, state: KeyState) void {
         if (pressed) xkb.XKB_KEY_DOWN else xkb.XKB_KEY_UP,
     );
     self.sendModifiers();
+}
+
+fn applyKeyUinput(self: *RemoteInput, uinput: *UinputKeyboard, key: u32, state: KeyState) void {
+    if (state == .repeated) {
+        if (!self.pressed_keys[key]) return;
+        uinput.key(self.io, key, 2);
+        return;
+    }
+    const pressed = state == .pressed;
+    if (self.pressed_keys[key] == pressed) return;
+    self.pressed_keys[key] = pressed;
+    uinput.key(self.io, key, if (pressed) 1 else 0);
 }
 
 fn sendModifiers(self: *RemoteInput) void {
@@ -361,6 +391,10 @@ pub fn releaseAll(self: *RemoteInput) void {
         if (!pressed.*) continue;
         pressed.* = false;
         released_key = true;
+        if (self.uinput) |*uinput| {
+            uinput.key(self.io, @intCast(key), 0);
+            continue;
+        }
         if (self.keyboard) |keyboard| {
             keyboard.key(time, @intCast(key), @intFromEnum(wl.Keyboard.KeyState.released));
         }

@@ -54,6 +54,8 @@ const usage =
     \\  --audio-rtp-port PORT
     \\                      send Opus RTP to a loopback UDP port
     \\  --audio-source NAME PulseAudio monitor source (disabled by default)
+    \\  --input-backend BACKEND
+    \\                      keyboard injection: wayland or uinput (default: wayland)
     \\  --version           show the Waymote version
     \\  --help              show this help
     \\
@@ -68,6 +70,7 @@ const Options = struct {
     rtp_port: ?u16 = null,
     audio_rtp_port: ?u16 = null,
     audio_source: ?[]const u8 = null,
+    input_backend: RemoteInput.Backend = .wayland,
     version: bool = false,
     help: bool = false,
 };
@@ -143,7 +146,7 @@ pub fn main(init: std.process.Init) !void {
             .ffmpeg_path = options.ffmpeg_path,
             .rtp_port = options.rtp_port,
         }),
-        .remote_input = .init(init.io, options.xkb_layout),
+        .remote_input = .init(init.io, options.xkb_layout, options.input_backend),
         .clipboard = .init(init.gpa, init.io),
     };
     defer stream.deinit();
@@ -1021,6 +1024,10 @@ fn parseArguments(arguments: anytype) !Options {
             if (value.len == 0 or value.len > 255 or std.mem.indexOfScalar(u8, value, 0) != null)
                 return error.InvalidAudioSource;
             options.audio_source = value;
+        } else if (std.mem.eql(u8, argument, "--input-backend")) {
+            const value = arguments.next() orelse return error.MissingArgument;
+            options.input_backend = std.meta.stringToEnum(RemoteInput.Backend, value) orelse
+                return error.InvalidInputBackend;
         } else if (std.mem.eql(u8, argument, "--xkb-layout")) {
             options.xkb_layout = arguments.next() orelse return error.MissingArgument;
             if (!RemoteInput.validLayout(options.xkb_layout)) return error.InvalidXkbLayout;

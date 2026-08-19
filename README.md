@@ -110,6 +110,25 @@ The server requires FFmpeg with `libx264`, a Pulse-compatible audio source for
 audio, and the relevant Wayland protocols. The release archive currently
 targets Linux x86-64.
 
+## Keyboard injection
+
+`waymote-streamd` injects keys through `zwp_virtual_keyboard_v1`, which enters
+the compositor's seat above evdev. A remapper that grabs evdev devices, such as
+keyd, never sees those keys, so none of its layers apply and the desktop
+shortcuts built on them do not fire.
+
+Pass `-input-backend uinput` to the gateway to write the same evdev codes to
+`/dev/uinput` instead, below the remapper. The daemon needs write access to that
+node, which a udev rule granting a group the user belongs to provides:
+
+```text
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+```
+
+Text input keeps the Wayland keyboard either way, since that path carries a
+synthesized keymap for characters no evdev code produces. The daemon falls back
+to the Wayland keyboard when `/dev/uinput` cannot be opened.
+
 ## Compositor compatibility
 
 Labwc is the compositor tested by this repository. Other wlroots compositors
