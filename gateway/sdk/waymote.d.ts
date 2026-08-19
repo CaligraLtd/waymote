@@ -68,6 +68,7 @@ export interface InputState {
   readonly pointerLocked: boolean;
   /** Linux key codes of the one-shot modifiers latched for the next key press. */
   readonly stickyModifiers: readonly number[];
+  readonly keyboardLocked: boolean;
 }
 
 export interface AudioState {
@@ -179,6 +180,8 @@ export interface SurfaceOptions {
 export interface SurfaceHandle {
   requestPointerLock(): Promise<void>;
   exitPointerLock(): void;
+  requestFullscreen(): Promise<void>;
+  exitFullscreen(): Promise<void>;
   focus(): void;
   focusTextInput(): void;
   dispose(): void;
