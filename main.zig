@@ -35,6 +35,7 @@ const maximum_scale = 480;
 const initial_audio_restart_delay_ms = 1000;
 const maximum_audio_restart_delay_ms = 30_000;
 const stable_audio_run_ms = 30_000;
+const maximum_capture_failures = 30;
 
 const OutputMode = struct {
     width: u32,
@@ -101,6 +102,7 @@ damage_first_row: u32 = 0,
 damage_end_row: u32 = 0,
 captured_once: bool = false,
 cursor_overlay: bool = false,
+consecutive_capture_failures: u32 = 0,
 acknowledged_keyframe_generation: u32 = 0,
 video_encoder: VideoEncoder,
 audio_encoder: ?std.process.Child = null,
@@ -403,6 +405,23 @@ fn setCursorOverlay(self: *Stream, enabled: bool) !void {
     }
     self.captured_once = false;
     try self.requestFrame();
+}
+
+// The compositor fails the frame in flight whenever it reconfigures the
+// output, which a viewer triggers on every window resize. Request a new
+// capture instead of ending the stream, and give up only once the output stops
+// producing frames altogether.
+fn retryCapture(self: *Stream) void {
+    self.consecutive_capture_failures += 1;
+    if (self.consecutive_capture_failures > maximum_capture_failures) {
+        return self.fail(error.CaptureFailed);
+    }
+    if (self.frame) |frame| {
+        frame.destroy();
+        self.frame = null;
+    }
+    self.constraints_received = false;
+    self.requestFrame() catch |err| self.fail(err);
 }
 
 fn modeRequiresVideoGeneration(
@@ -733,6 +752,7 @@ fn submitFrame(self: *Stream) void {
     self.frame_sequence += 1;
     const frame = self.frame orelse return self.fail(error.MissingCaptureFrame);
     self.captured_once = true;
+    self.consecutive_capture_failures = 0;
     frame.destroy();
     self.frame = null;
     self.requestFrame() catch |err| self.fail(err);
@@ -918,7 +938,9 @@ fn frameListener(
         },
         .buffer_done => {
             if (!self.constraints_received) return self.fail(error.MissingBufferConstraints);
-            self.copying_with_damage = waitForDamage(
+            // After a failed frame, copy the whole output: the damage that
+            // frame would have reported may not be reported again.
+            self.copying_with_damage = self.consecutive_capture_failures == 0 and waitForDamage(
                 self.captured_once,
                 self.generation,
                 self.acknowledged_keyframe_generation,
@@ -936,7 +958,7 @@ fn frameListener(
             if (bits != 0) self.fail(error.UnsupportedCaptureTransform);
         },
         .ready => self.submitFrame(),
-        .failed => self.fail(error.CaptureFailed),
+        .failed => self.retryCapture(),
         .damage => |damage| {
             self.damage_first_row = @min(self.damage_first_row, damage.y);
             self.damage_end_row = @max(self.damage_end_row, damage.y +| damage.height);
