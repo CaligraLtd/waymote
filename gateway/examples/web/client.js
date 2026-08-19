@@ -11,6 +11,7 @@ const latency = document.querySelector("#latency");
 const audioButton = document.querySelector("#audio");
 const audioStatus = document.querySelector("#audio-status");
 const pointerLockButton = document.querySelector("#pointer-lock");
+const fullscreenButton = document.querySelector("#fullscreen");
 const textInputButton = document.querySelector("#text-input");
 const sendClipboardButton = document.querySelector("#send-clipboard");
 const copyClipboardButton = document.querySelector("#copy-clipboard");
@@ -52,6 +53,7 @@ session.on("state", (state) => {
   audioButton.textContent = state.audio.muted ? "Unmute audio"
     : state.audio.state === "active" ? "Mute audio" : "Enable audio";
   pointerLockButton.textContent = state.input.pointerLocked ? "Unlock pointer" : "Lock pointer";
+  fullscreenButton.textContent = state.input.keyboardLocked ? "Exit fullscreen" : "Fullscreen";
   if (state.video.state === "error") {
     empty.textContent = state.video.message;
     empty.classList.remove("hidden");
@@ -123,6 +125,17 @@ pointerLockButton.addEventListener("click", () => {
   }
 });
 
+fullscreenButton.addEventListener("click", () => {
+  const action = document.fullscreenElement === display
+    ? surface.exitFullscreen()
+    : surface.requestFullscreen();
+  action.catch((error) => {
+    console.warn("fullscreen failed", error);
+  });
+  session.input.acquire();
+  surface.focus();
+});
+
 textInputButton.addEventListener("click", () => {
   session.input.acquire();
   surface.focusTextInput();
@@ -168,3 +181,4 @@ for (const button of document.querySelectorAll("button")) {
 }
 
 session.connect();
+
