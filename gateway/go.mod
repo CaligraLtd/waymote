@@ -1,6 +1,6 @@
 module github.com/rockorager/waymote/gateway
 
-go 1.26
+go 1.25
 
 require github.com/coder/websocket v1.8.15
 
