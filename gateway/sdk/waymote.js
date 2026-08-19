@@ -206,6 +206,7 @@ const resizeRequests = new Map();
 let resizeState = "idle";
 const pressedKeys = new Set();
 const pressedButtons = new Set();
+let keyboardLockRequested = false;
 let physicalTextPending = false;
 let suppressCompositionText = null;
 let compositionTimer = null;
@@ -1080,6 +1081,39 @@ function handlePointerLockChange() {
   if (document.pointerLockElement !== display) releaseInput();
 }
 
+// Shortcuts the browser or the desktop reserves for itself never reach a
+// keydown listener. The Keyboard Lock API redirects them to the page, but only
+// while the document is fullscreen, so lock and unlock follow fullscreen.
+function handleFullscreenChange() {
+  const fullscreen = document.fullscreenElement !== null &&
+    (document.fullscreenElement === display || document.fullscreenElement.contains(display));
+  owner.updateState("input", { keyboardLocked: fullscreen && keyboardLockRequested });
+  if (fullscreen) {
+    void lockKeyboard();
+  } else {
+    unlockKeyboard();
+  }
+}
+
+async function lockKeyboard() {
+  if (!navigator.keyboard?.lock) return;
+  try {
+    await navigator.keyboard.lock();
+    keyboardLockRequested = true;
+    owner.updateState("input", { keyboardLocked: true });
+  } catch (error) {
+    keyboardLockRequested = false;
+    emit("error", error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+function unlockKeyboard() {
+  if (!keyboardLockRequested) return;
+  keyboardLockRequested = false;
+  navigator.keyboard?.unlock?.();
+  owner.updateState("input", { keyboardLocked: false });
+}
+
 function handlePointerDown(event) {
   const locked = document.pointerLockElement === display;
   const position = locked ? null : contentPosition(event);
@@ -1857,6 +1891,7 @@ function attachSurface(surfaceOptions) {
   addSurfaceListener(document, "pointerlockerror", () => {
     emit("error", new Error("The browser denied pointer lock"));
   });
+  addSurfaceListener(document, "fullscreenchange", handleFullscreenChange);
   addSurfaceListener(document, "visibilitychange", handleVisibilityChange);
   refreshResizeObservation();
 
@@ -1866,6 +1901,7 @@ function attachSurface(surfaceOptions) {
     if (surfaceDisposed) return;
     surfaceDisposed = true;
     releaseControl();
+    unlockKeyboard();
     if (document.pointerLockElement === attachedCanvas) document.exitPointerLock();
     for (const cleanup of surfaceCleanup.splice(0)) cleanup();
     resizeObserver?.disconnect();
@@ -1891,6 +1927,14 @@ function attachSurface(surfaceOptions) {
     },
     exitPointerLock() {
       if (document.pointerLockElement === attachedCanvas) document.exitPointerLock();
+    },
+    requestFullscreen() {
+      if (surfaceDisposed) throw new Error("The surface has been disposed");
+      return Promise.resolve(attachedCanvas.requestFullscreen());
+    },
+    exitFullscreen() {
+      if (document.fullscreenElement === attachedCanvas) return Promise.resolve(document.exitFullscreen());
+      return Promise.resolve();
     },
     focus() {
       if (surfaceDisposed) throw new Error("The surface has been disposed");
@@ -2113,6 +2157,7 @@ export class WaymoteSession {
         message: "Input idle",
         connected: false,
         pointerLocked: false,
+        keyboardLocked: false,
       }),
       audio: Object.freeze({
         state: "idle",

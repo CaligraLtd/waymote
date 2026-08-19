@@ -60,6 +60,7 @@ export interface InputState {
   readonly message: string;
   readonly connected: boolean;
   readonly pointerLocked: boolean;
+  readonly keyboardLocked: boolean;
 }
 
 export interface AudioState {
@@ -138,6 +139,8 @@ export interface SurfaceOptions {
 export interface SurfaceHandle {
   requestPointerLock(): Promise<void>;
   exitPointerLock(): void;
+  requestFullscreen(): Promise<void>;
+  exitFullscreen(): Promise<void>;
   focus(): void;
   focusTextInput(): void;
   dispose(): void;
