@@ -90,6 +90,7 @@ width: u32 = 0,
 height: u32 = 0,
 stride: u32 = 0,
 capture_format: ?wl.Shm.Format = null,
+capture_pixel_format: VideoEncoder.PixelFormat = .bgra,
 constraints_received: bool = false,
 captured_once: bool = false,
 cursor_overlay: bool = false,
@@ -692,6 +693,7 @@ fn submitFrame(self: *Stream) void {
         .raw_height = self.height,
         .encoded_width = encoded.width,
         .encoded_height = encoded.height,
+        .pixel_format = self.capture_pixel_format,
         .capture_nanos = capture_nanos,
         .sequence = self.frame_sequence,
         .input_sequence = self.latest_input_sequence,
@@ -871,15 +873,21 @@ fn frameListener(
 ) void {
     switch (event) {
         .buffer => |buffer| {
-            // Both formats are byte-ordered BGRX/BGRA on little-endian Linux;
-            // FFmpeg's bgra input ignores the unused alpha byte for H.264.
-            if (buffer.format != .argb8888 and buffer.format != .xrgb8888) {
-                return self.fail(error.UnsupportedPixelFormat);
-            }
+            // On little-endian Linux argb8888/xrgb8888 are byte-ordered BGRA and
+            // abgr8888/xbgr8888 are byte-ordered RGBA. Which one a compositor
+            // offers follows its renderer: wlroots reports xrgb8888 for Pixman
+            // and xbgr8888 for GLES2 on Mesa. FFmpeg ignores the unused alpha
+            // byte for H.264 either way.
+            const pixel_format: VideoEncoder.PixelFormat = switch (buffer.format) {
+                .argb8888, .xrgb8888 => .bgra,
+                .abgr8888, .xbgr8888 => .rgba,
+                else => return self.fail(error.UnsupportedPixelFormat),
+            };
             self.ensureBuffer(buffer.width, buffer.height, buffer.stride, buffer.format) catch |err| {
                 self.fail(err);
                 return;
             };
+            self.capture_pixel_format = pixel_format;
             self.constraints_received = true;
         },
         .buffer_done => {
